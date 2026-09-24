@@ -1,0 +1,104 @@
+import { spawnSync } from "node:child_process";
+import { rmSync } from "node:fs";
+import { join } from "node:path";
+import { STATE_DIR } from "./config.ts";
+
+interface GitResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+}
+
+function run(root: string, args: string[]): GitResult {
+  const r = spawnSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
+  if (r.error) throw r.error;
+  return { code: r.status ?? 1, stdout: r.stdout, stderr: r.stderr };
+}
+
+export function git(root: string, args: string[]): string {
+  const r = run(root, args);
+  if (r.code !== 0) throw new Error(`git ${args.join(" ")} gagal:\n${r.stderr.trim()}`);
+  return r.stdout;
+}
+
+export function repoRoot(cwd: string): string {
+  const r = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8" });
+  if (r.status !== 0) throw new Error(`${cwd} bukan repositori git.`);
+  return r.stdout.trim();
+}
+
+export interface WorkingState {
+  tracked: string[]; // file tracked yang berubah/terhapus/ter-stage
+  untracked: string[];
+}
+
+const isState = (p: string): boolean => p === STATE_DIR || p.startsWith(`${STATE_DIR}/`);
+
+export function workingState(root: string): WorkingState {
+  const out = git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+  const entries = out.split("\0").filter(Boolean);
+  const tracked: string[] = [];
+  const untracked: string[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    const code = entries[i].slice(0, 2);
+    const path = entries[i].slice(3);
+    // Rename/copy menyertakan path asal sebagai entri berikutnya.
+    if (code[0] === "R" || code[0] === "C") i++;
+    if (isState(path)) continue;
+    (code === "??" ? untracked : tracked).push(path);
+  }
+  return { tracked, untracked };
+}
+
+export function head(root: string): string {
+  return git(root, ["rev-parse", "HEAD"]).trim();
+}
+
+export function currentBranch(root: string): string {
+  return git(root, ["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+}
+
+export function branchExists(root: string, name: string): boolean {
+  return run(root, ["rev-parse", "--verify", "--quiet", `refs/heads/${name}`]).code === 0;
+}
+
+export function switchBranch(root: string, name: string, create: boolean): void {
+  git(root, create ? ["switch", "-q", "-c", name] : ["switch", "-q", name]);
+}
+
+export function newFiles(root: string, untrackedBefore: string[]): string[] {
+  const before = new Set(untrackedBefore);
+  return workingState(root).untracked.filter((p) => !before.has(p));
+}
+
+// Diff perubahan tugas: file tracked + file baru (untracked yang belum ada
+// sebelum tugas dimulai). File untracked milik user tidak ikut.
+export function taskDiff(root: string, untrackedBefore: string[]): string {
+  const parts = [git(root, ["diff", "HEAD", "--", ".", `:(exclude)${STATE_DIR}`])];
+  for (const file of newFiles(root, untrackedBefore)) {
+    // --no-index keluar dengan kode 1 bila ada perbedaan, jadi pakai run().
+    parts.push(run(root, ["diff", "--no-index", "--", "/dev/null", file]).stdout);
+  }
+  return parts.filter(Boolean).join("\n");
+}
+
+export function commitTask(root: string, untrackedBefore: string[], message: string): string | undefined {
+  const files = [...workingState(root).tracked, ...newFiles(root, untrackedBefore)];
+  if (files.length === 0) return undefined;
+  git(root, ["add", "-A", "--", ...files]);
+  git(root, ["commit", "-q", "-m", message]);
+  return git(root, ["rev-parse", "--short", "HEAD"]).trim();
+}
+
+// Kembalikan working tree ke HEAD, tapi hanya menghapus file untracked yang
+// muncul setelah tugas dimulai. File untracked milik user tidak disentuh.
+export function rollback(root: string, untrackedBefore: string[]): void {
+  git(root, ["reset", "-q"]);
+  const { tracked } = workingState(root);
+  if (tracked.length > 0) git(root, ["checkout", "-q", "HEAD", "--", ...tracked]);
+  for (const file of newFiles(root, untrackedBefore)) rmSync(join(root, file), { force: true });
+}
+
+export function lastCommitSubject(root: string): string {
+  return git(root, ["log", "-1", "--format=%s"]).trim();
+}
