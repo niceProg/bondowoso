@@ -7,17 +7,34 @@ lolos gate (lint/test/build) dan Reviewer sebelum di-commit ke branch terpisah.
 Memakai CLI `claude` resmi dengan login langganan (Max), bukan API key.
 `ANTHROPIC_API_KEY` selalu dibuang dari env agent supaya tidak menagih API.
 
-## Pakai
+## Instalasi
+
+Butuh Node 24+ (menjalankan TypeScript langsung, tanpa build) dan Claude Code
+yang sudah login dengan akun langganan.
 
 ```bash
-cd <repo target>
-node ~/Working/bondowoso/src/cli.ts init            # buat .bondowoso/config.yaml, rapikan gate-nya
-node ~/Working/bondowoso/src/cli.ts plan "<permintaan>"
-# baca & edit .bondowoso/plan.md
-node ~/Working/bondowoso/src/cli.ts approve
-node ~/Working/bondowoso/src/cli.ts work             # --wait: tunggu sendiri saat kuota habis
-node ~/Working/bondowoso/src/cli.ts status
+git clone git@github.com:niceProg/bondowoso.git
+cd bondowoso
+npm install
+npm link          # pasang perintah `bondowoso` secara global
 ```
+
+## Pakai
+
+Jalankan dari dalam repo yang mau dikerjakan:
+
+```bash
+cd <repo>
+bondowoso init                  # buat .bondowoso/config.yaml, rapikan gate-nya
+bondowoso plan "<permintaan>"   # Lead menulis .bondowoso/plan.md
+# baca & edit .bondowoso/plan.md
+bondowoso approve               # pecah rencana menjadi tugas
+bondowoso work                  # --wait: tunggu sendiri saat kuota habis
+bondowoso status
+bondowoso reset <id>            # kembalikan tugas blocked ke pending
+```
+
+Dari luar repo, pakai `-C`: `bondowoso -C <repo> status`.
 
 Kode keluar `work`: `0` semua selesai, `2` ada tugas blocked, `75` kuota Max habis
 (jalankan `work` lagi nanti untuk melanjutkan), `1` error lain.
