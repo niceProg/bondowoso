@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { nextTask, validateTaskGraph, type Manifest, type TaskSpec } from "../src/manifest.ts";
 import { buildArgs, parseResetTime } from "../src/runner/claude.ts";
 import { DeveloperOutput } from "../src/roles.ts";
+import { describeDenials, mergeDenied, suggestPattern } from "../src/denials.ts";
 
 const spec = (id: string, depends_on: string[] = []): TaskSpec => ({
   id,
@@ -71,5 +72,25 @@ describe("buildArgs", () => {
     expect(args).toContain("--strict-mcp-config");
     expect(args.slice(-3)).toEqual(["--allowedTools", "Edit", "Bash(go test:*)"]);
     expect(JSON.parse(args[args.indexOf("--json-schema") + 1])).not.toHaveProperty("$schema");
+  });
+});
+
+describe("denials", () => {
+  it("meringkas permission_denials jadi satu baris per aksi", () => {
+    expect(
+      describeDenials([
+        { tool_name: "Bash", tool_input: { command: "rm a.vue\nrm b.vue" } },
+        { tool_name: "Glob", tool_input: { pattern: "/opt/*" } },
+      ]),
+    ).toEqual(["rm a.vue", 'Glob({"pattern":"/opt/*"})']);
+  });
+  it("menebak pola developer_bash", () => {
+    expect(suggestPattern("cd web && git rm app/x.vue")).toBe("git rm:*");
+    expect(suggestPattern("npx eslint app/")).toBe("npx eslint:*");
+    expect(suggestPattern("rm -f a.vue")).toBe("rm:*");
+    expect(suggestPattern("Glob({})")).toBeUndefined();
+  });
+  it("menggabungkan tanpa duplikat", () => {
+    expect(mergeDenied(["a"], ["a", "b"])).toEqual(["a", "b"]);
   });
 });

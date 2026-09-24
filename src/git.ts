@@ -30,6 +30,7 @@ export function repoRoot(cwd: string): string {
 export interface WorkingState {
   tracked: string[]; // file tracked yang berubah/terhapus/ter-stage
   untracked: string[];
+  stagedDeletions: string[]; // sudah hilang dari index, mis. hasil `git rm`
 }
 
 const isState = (p: string): boolean => p === STATE_DIR || p.startsWith(`${STATE_DIR}/`);
@@ -39,6 +40,7 @@ export function workingState(root: string): WorkingState {
   const entries = out.split("\0").filter(Boolean);
   const tracked: string[] = [];
   const untracked: string[] = [];
+  const stagedDeletions: string[] = [];
   for (let i = 0; i < entries.length; i++) {
     const code = entries[i].slice(0, 2);
     const path = entries[i].slice(3);
@@ -46,8 +48,9 @@ export function workingState(root: string): WorkingState {
     if (code[0] === "R" || code[0] === "C") i++;
     if (isState(path)) continue;
     (code === "??" ? untracked : tracked).push(path);
+    if (code[0] === "D") stagedDeletions.push(path);
   }
-  return { tracked, untracked };
+  return { tracked, untracked, stagedDeletions };
 }
 
 export function head(root: string): string {
@@ -73,19 +76,30 @@ export function newFiles(root: string, untrackedBefore: string[]): string[] {
 
 // Diff perubahan tugas: file tracked + file baru (untracked yang belum ada
 // sebelum tugas dimulai). File untracked milik user tidak ikut.
-export function taskDiff(root: string, untrackedBefore: string[]): string {
-  const parts = [git(root, ["diff", "HEAD", "--", ".", `:(exclude)${STATE_DIR}`])];
+// `binary: true` menghasilkan patch yang bisa dipasang ulang dengan `git apply`.
+export function taskDiff(root: string, untrackedBefore: string[], opts: { binary?: boolean } = {}): string {
+  const flags = opts.binary ? ["--binary"] : [];
+  const parts = [git(root, ["diff", ...flags, "HEAD", "--", ".", `:(exclude)${STATE_DIR}`])];
   for (const file of newFiles(root, untrackedBefore)) {
     // --no-index keluar dengan kode 1 bila ada perbedaan, jadi pakai run().
-    parts.push(run(root, ["diff", "--no-index", "--", "/dev/null", file]).stdout);
+    parts.push(run(root, ["diff", ...flags, "--no-index", "--", "/dev/null", file]).stdout);
   }
-  return parts.filter(Boolean).join("\n");
+  return parts.filter(Boolean).join(opts.binary ? "" : "\n");
+}
+
+export function applyPatch(root: string, patchPath: string): void {
+  git(root, ["apply", "--binary", "--whitespace=nowarn", patchPath]);
 }
 
 export function commitTask(root: string, untrackedBefore: string[], message: string): string | undefined {
-  const files = [...workingState(root).tracked, ...newFiles(root, untrackedBefore)];
+  const state = workingState(root);
+  const files = [...state.tracked, ...newFiles(root, untrackedBefore)];
   if (files.length === 0) return undefined;
-  git(root, ["add", "-A", "--", ...files]);
+  // Penghapusan yang sudah ter-stage tidak punya pathspec lagi; `git add`
+  // akan gagal kalau path itu disebut.
+  const staged = new Set(state.stagedDeletions);
+  const toAdd = files.filter((f) => !staged.has(f));
+  if (toAdd.length > 0) git(root, ["add", "-A", "--", ...toAdd]);
   git(root, ["commit", "-q", "-m", message]);
   return git(root, ["rev-parse", "--short", "HEAD"]).trim();
 }

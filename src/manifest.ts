@@ -13,7 +13,7 @@ export const TaskSpecSchema = z.object({
 });
 
 const HistoryEntry = z.object({
-  step: z.enum(["developer", "gates", "reviewer", "commit", "rollback", "rate_limit"]),
+  step: z.enum(["developer", "gates", "reviewer", "commit", "rollback", "rate_limit", "resume"]),
   attempt: z.number().int(),
   result: z.string(),
   at: z.string(),
@@ -21,12 +21,18 @@ const HistoryEntry = z.object({
 });
 
 const TaskSchema = TaskSpecSchema.extend({
-  status: z.enum(["pending", "in_progress", "done", "blocked"]),
+  // resumed: patch percobaan terakhir sudah dipasang lagi lewat `bondowoso resume`
+  // dan menunggu `work` (mungkin setelah diedit manusia).
+  status: z.enum(["pending", "in_progress", "resumed", "done", "blocked"]),
   attempts: z.number().int().min(0),
   commit: z.string().optional(),
   untracked_before: z.array(z.string()).optional(),
   feedback: z.string().optional(),
   blocked_reason: z.string().optional(),
+  // Patch perubahan yang terakhir dibuang (relatif ke .bondowoso/), untuk `resume`.
+  last_patch: z.string().optional(),
+  // Perintah/tool yang ditolak permission selama tugas ini, tanpa duplikat.
+  denied: z.array(z.string()).optional(),
   history: z.array(HistoryEntry),
 });
 
@@ -74,6 +80,8 @@ export function record(task: Task, step: HistoryStep, attempt: number, result: s
 }
 
 export function nextTask(manifest: Manifest): Task | undefined {
+  const resumed = manifest.tasks.find((t) => t.status === "resumed");
+  if (resumed) return resumed;
   const done = new Set(manifest.tasks.filter((t) => t.status === "done").map((t) => t.id));
   return manifest.tasks.find((t) => t.status === "pending" && t.depends_on.every((d) => done.has(d)));
 }

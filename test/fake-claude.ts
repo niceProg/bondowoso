@@ -2,6 +2,7 @@
 // Pengganti `claude` untuk test. Skenario dibaca dari BONDOWOSO_FAKE_SCRIPT:
 // { "<peran>": [langkah panggilan ke-0, ke-1, ...] }. Setiap panggilan dicatat
 // ke <script>.calls.jsonl supaya test bisa memeriksa prompt yang dikirim.
+import { execSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
@@ -9,6 +10,8 @@ interface Step {
   output?: unknown;
   write?: Record<string, string>;
   remove?: string[];
+  run?: string[]; // perintah shell, mis. "git rm old.txt"
+  denials?: unknown[];
   rateLimit?: boolean;
 }
 
@@ -36,8 +39,15 @@ for (const [path, content] of Object.entries(step!.write ?? {})) {
   writeFileSync(path, content);
 }
 for (const path of step!.remove ?? []) rmSync(path, { force: true });
+for (const cmd of step!.run ?? []) execSync(cmd, { stdio: "ignore" });
 
 if (step!.rateLimit) {
   reply({ is_error: true, subtype: "error", api_error_status: 429, result: "Claude usage limit reached. Your limit resets 3pm" }, 1);
 }
-reply({ is_error: false, subtype: "success", result: JSON.stringify(step!.output), structured_output: step!.output });
+reply({
+  is_error: false,
+  subtype: "success",
+  result: JSON.stringify(step!.output),
+  structured_output: step!.output,
+  permission_denials: step!.denials ?? [],
+});

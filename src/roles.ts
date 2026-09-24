@@ -50,8 +50,12 @@ function template(name: string, config: Config): string {
   const gates = config.gates.length
     ? config.gates.map((g) => `\`${g.run}\`${g.cwd !== "." ? ` (in ${g.cwd}/)` : ""}`).join(", ")
     : "(none configured)";
+  const allowedBash = config.developer_bash.length
+    ? config.developer_bash.map((p) => `- \`${p.replace(/:\*$/, " …")}\``).join("\n")
+    : "- (nothing else)";
   return readFileSync(join(PROMPTS_DIR, `${name}.md`), "utf8")
     .replaceAll("{{gates}}", gates)
+    .replaceAll("{{allowed_bash}}", allowedBash)
     .replaceAll("{{language}}", config.language);
 }
 

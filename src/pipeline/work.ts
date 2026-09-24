@@ -1,7 +1,8 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { loadConfig, type Config, type Ctx } from "../config.ts";
+import { describeDenials, formatDenied, mergeDenied } from "../denials.ts";
 import { formatGateFailures, gateLog, runGates } from "../gates.ts";
 import * as git from "../git.ts";
 import { log } from "../log.ts";
@@ -12,6 +13,9 @@ import { planHash, runDir } from "./plan.ts";
 
 export const EXIT_RATE_LIMIT = 75;
 const RATE_LIMIT_POLL_MS = 15 * 60_000;
+
+const RESUMED_SUMMARY =
+  "(Tidak ada Developer di percobaan ini: perubahan dipasang ulang dari patch percobaan sebelumnya lewat `bondowoso resume`, dan mungkin sudah diedit manusia.)";
 
 interface WorkOptions {
   wait: boolean;
@@ -28,17 +32,22 @@ export async function work(ctx: Ctx, opts: WorkOptions): Promise<number> {
   }
   const plan = readFileSync(ctx.planPath, "utf8");
   const { root } = ctx;
+  const resumed = manifest.tasks.find((t) => t.status === "resumed");
 
   if (manifest.branch && git.currentBranch(root) !== manifest.branch) {
+    if (resumed) {
+      throw new Error(`${resumed.id} sedang di-resume di branch ${manifest.branch}. Pindah dulu ke branch itu.`);
+    }
     assertClean(root);
     git.switchBranch(root, manifest.branch, false);
     log.info(`Pindah ke branch ${manifest.branch}`);
   }
   recoverInterrupted(ctx, manifest);
-  assertClean(root);
+  // Tugas yang di-resume memang membawa perubahan di working tree.
+  if (!resumed) assertClean(root);
   if (!manifest.branch) createBranch(ctx, config, manifest);
 
-  if (!manifest.baseline_ok) {
+  if (!manifest.baseline_ok && !resumed) {
     log.step("Menjalankan gate pada kondisi awal (baseline)…");
     const results = runGates(root, config.gates);
     writeLog(ctx, manifest, "baseline-gates.log", gateLog(results));
@@ -58,9 +67,10 @@ export async function work(ctx: Ctx, opts: WorkOptions): Promise<number> {
     try {
       await runTask(ctx, config, manifest, task, plan);
     } catch (e) {
-      // Apa pun yang memutus tugas di tengah jalan: buang perubahan setengah
-      // jadi dan kembalikan tugas ke antrean tanpa menghitung percobaan itu.
-      git.rollback(root, task.untracked_before ?? []);
+      // Apa pun yang memutus tugas di tengah jalan: simpan perubahannya sebagai
+      // patch, bersihkan working tree, dan kembalikan tugas ke antrean tanpa
+      // menghitung percobaan itu.
+      discard(ctx, manifest, task);
       task.status = "pending";
       task.attempts = Math.max(0, task.attempts - 1);
       if (!(e instanceof RateLimitError)) {
@@ -82,6 +92,53 @@ export async function work(ctx: Ctx, opts: WorkOptions): Promise<number> {
   }
 
   return summarize(manifest);
+}
+
+// Pasang lagi patch percobaan terakhir sebuah tugas ke working tree, supaya
+// manusia bisa menambal bagian yang tidak bisa dikerjakan agent lalu
+// melanjutkan dengan `bondowoso work` (gate → Reviewer → commit).
+export function resume(ctx: Ctx, id: string): void {
+  const manifest = loadManifest(ctx);
+  const task = manifest.tasks.find((t) => t.id === id);
+  if (!task) throw new Error(`Tugas ${id} tidak ada.`);
+  if (task.status !== "blocked" && task.status !== "pending") {
+    throw new Error(`${id} berstatus ${task.status}; hanya tugas blocked atau pending yang bisa di-resume.`);
+  }
+  if (!task.last_patch) {
+    throw new Error(`Tidak ada patch tersimpan untuk ${id}. Pakai \`bondowoso reset ${id}\` untuk mengulang dari awal.`);
+  }
+  const other = manifest.tasks.find((t) => t.status === "resumed");
+  if (other) throw new Error(`${other.id} sudah di-resume dan belum selesai. Jalankan \`bondowoso work\` dulu.`);
+  const done = new Set(manifest.tasks.filter((t) => t.status === "done").map((t) => t.id));
+  const missing = task.depends_on.filter((d) => !done.has(d));
+  if (missing.length) throw new Error(`${id} masih menunggu ${missing.join(", ")}.`);
+
+  const { root } = ctx;
+  if (manifest.branch && git.currentBranch(root) !== manifest.branch) {
+    assertClean(root);
+    git.switchBranch(root, manifest.branch, false);
+  }
+  assertClean(root);
+  task.untracked_before = git.workingState(root).untracked;
+  const patch = join(ctx.stateDir, task.last_patch);
+  try {
+    git.applyPatch(root, patch);
+  } catch (e) {
+    throw new Error(
+      `Patch ${task.last_patch} tidak bisa dipasang, mungkin bentrok dengan commit yang lebih baru.\n${(e as Error).message}\nPakai \`bondowoso reset ${id}\` untuk mengulang dari awal.`,
+    );
+  }
+
+  const why = task.blocked_reason ?? "terputus sebelum selesai";
+  task.feedback = `Percobaan sebelumnya berhenti: ${why}\nPerubahannya sudah dipasang lagi di working tree dan mungkin sudah diedit manusia; lanjutkan dari sana.`;
+  task.status = "resumed";
+  task.attempts = 0;
+  delete task.blocked_reason;
+  record(task, "resume", 0, "applied", task.last_patch);
+  saveManifest(ctx, manifest);
+
+  log.ok(`Patch ${id} dipasang ke working tree (${task.last_patch}).`);
+  log.info("Tambal manual kalau perlu, lalu jalankan `bondowoso work`: gate → Reviewer → commit.");
 }
 
 function assertClean(root: string): void {
@@ -111,7 +168,7 @@ function createBranch(ctx: Ctx, config: Config, manifest: Manifest): void {
 
 // Tugas yang masih in_progress berarti proses sebelumnya terputus (Ctrl+C,
 // crash, laptop mati). Kalau commit-nya sempat dibuat, tandai selesai;
-// kalau belum, buang sisa perubahannya.
+// kalau belum, simpan sisa perubahannya sebagai patch lalu bersihkan.
 function recoverInterrupted(ctx: Ctx, manifest: Manifest): void {
   for (const task of manifest.tasks.filter((t) => t.status === "in_progress")) {
     if (git.lastCommitSubject(ctx.root).startsWith(`${task.id}:`)) {
@@ -119,11 +176,12 @@ function recoverInterrupted(ctx: Ctx, manifest: Manifest): void {
       task.commit = git.head(ctx.root).slice(0, 7);
       log.info(`${task.id} ternyata sudah ter-commit sebelum terputus`);
     } else {
-      git.rollback(ctx.root, task.untracked_before ?? git.workingState(ctx.root).untracked);
+      task.untracked_before ??= git.workingState(ctx.root).untracked;
+      discard(ctx, manifest, task);
       task.status = "pending";
       task.attempts = Math.max(0, task.attempts - 1);
       record(task, "rollback", task.attempts + 1, "interrupted");
-      log.warn(`${task.id} terputus sebelumnya; perubahan setengah jadi dibuang`);
+      log.warn(`${task.id} terputus sebelumnya; working tree dibersihkan`);
     }
     saveManifest(ctx, manifest);
   }
@@ -132,27 +190,41 @@ function recoverInterrupted(ctx: Ctx, manifest: Manifest): void {
 async function runTask(ctx: Ctx, config: Config, manifest: Manifest, task: Task, plan: string): Promise<void> {
   const { root } = ctx;
   const max = config.limits.max_attempts;
+  // Tugas hasil `resume` langsung ke gate + Reviewer; Developer baru dipanggil
+  // kalau salah satunya menolak.
+  let skipDeveloper = task.status === "resumed";
+  if (!skipDeveloper) task.untracked_before = git.workingState(root).untracked;
   task.status = "in_progress";
-  task.untracked_before = git.workingState(root).untracked;
   saveManifest(ctx, manifest);
-  log.step(`${task.id}: ${task.title}`);
+  log.step(`${task.id}: ${task.title}${skipDeveloper ? " (lanjutan dari resume)" : ""}`);
 
   while (task.attempts < max) {
     task.attempts++;
     const n = task.attempts;
     saveManifest(ctx, manifest);
 
-    log.step(`${task.id} percobaan ${n}/${max}: Developer (${config.roles.developer.model}) bekerja…`);
-    const dev = await runAgent(
-      developerRequest(ctx, config, manifest, task, plan, task.feedback ?? "", logPath(ctx, manifest, task, "developer", n, "json")),
-    );
-    const denied = dev.denials.length ? `${dev.denials.length} aksi ditolak` : undefined;
-    record(task, "developer", n, dev.output.status, denied);
-    if (denied) log.warn(`${task.id}: ${denied}; lihat log dan pertimbangkan menambah developer_bash`);
+    let summary: string;
+    if (skipDeveloper) {
+      skipDeveloper = false;
+      summary = RESUMED_SUMMARY;
+      record(task, "resume", n, "skip-developer");
+    } else {
+      log.step(`${task.id} percobaan ${n}/${max}: Developer (${config.roles.developer.model}) bekerja…`);
+      const dev = await runAgent(
+        developerRequest(ctx, config, manifest, task, plan, task.feedback ?? "", logPath(ctx, manifest, task, "developer", n, "json")),
+      );
+      summary = dev.output.summary;
+      const denied = describeDenials(dev.denials);
+      if (denied.length) {
+        task.denied = mergeDenied(task.denied, denied);
+        log.warn(`${task.id}: ${denied.length} aksi ditolak permission (lihat \`bondowoso status\`)`);
+      }
+      record(task, "developer", n, dev.output.status, denied.length ? `${denied.length} aksi ditolak` : undefined);
 
-    if (dev.output.status === "blocked") {
-      block(ctx, manifest, task, `Developer: ${dev.output.blocked_reason || dev.output.summary}`);
-      return;
+      if (dev.output.status === "blocked") {
+        block(ctx, manifest, task, `Developer: ${dev.output.blocked_reason || dev.output.summary}`);
+        return;
+      }
     }
 
     log.step(`${task.id}: menjalankan gate…`);
@@ -168,9 +240,9 @@ async function runTask(ctx: Ctx, config: Config, manifest: Manifest, task: Task,
     }
 
     log.step(`${task.id}: Reviewer (${config.roles.reviewer.model}) memeriksa…`);
-    const diff = git.taskDiff(root, task.untracked_before);
+    const diff = git.taskDiff(root, task.untracked_before ?? []);
     const review = await runAgent(
-      reviewerRequest(ctx, config, manifest, task, dev.output.summary, diff, logPath(ctx, manifest, task, "reviewer", n, "json")),
+      reviewerRequest(ctx, config, manifest, task, summary, diff, logPath(ctx, manifest, task, "reviewer", n, "json")),
     );
     record(task, "reviewer", n, review.output.verdict, review.output.issues.length ? `${review.output.issues.length} issue` : undefined);
 
@@ -181,7 +253,7 @@ async function runTask(ctx: Ctx, config: Config, manifest: Manifest, task: Task,
       continue;
     }
 
-    const commit = git.commitTask(root, task.untracked_before, `${task.id}: ${task.title}\n\n${dev.output.summary}`);
+    const commit = git.commitTask(root, task.untracked_before ?? [], `${task.id}: ${task.title}\n\n${summary}`);
     task.status = "done";
     task.commit = commit;
     delete task.feedback;
@@ -194,13 +266,31 @@ async function runTask(ctx: Ctx, config: Config, manifest: Manifest, task: Task,
   block(ctx, manifest, task, `Gagal setelah ${max} percobaan. Feedback terakhir:\n${task.feedback ?? "-"}`);
 }
 
+// Simpan perubahan tugas sebagai patch sebelum working tree dibersihkan, jadi
+// hasil kerja agent tidak pernah hilang dan bisa dipasang lagi lewat `resume`.
+function discard(ctx: Ctx, manifest: Manifest, task: Task): void {
+  const before = task.untracked_before ?? git.workingState(ctx.root).untracked;
+  const patch = git.taskDiff(ctx.root, before, { binary: true });
+  if (patch.trim()) {
+    const file = logPath(ctx, manifest, task, "attempt", Math.max(1, task.attempts), "patch");
+    writeFileSync(file, patch);
+    task.last_patch = relative(ctx.stateDir, file);
+    log.info(`Perubahan ${task.id} disimpan di .bondowoso/${task.last_patch}`);
+  }
+  git.rollback(ctx.root, before);
+}
+
 function block(ctx: Ctx, manifest: Manifest, task: Task, reason: string): void {
-  git.rollback(ctx.root, task.untracked_before ?? []);
+  discard(ctx, manifest, task);
   task.status = "blocked";
   task.blocked_reason = reason;
   record(task, "rollback", task.attempts, "blocked");
   saveManifest(ctx, manifest);
   log.error(`${task.id} blocked: ${reason.split("\n")[0]}`);
+  if (task.denied?.length) log.info(formatDenied(task.denied));
+  if (task.last_patch) {
+    log.info(`Lanjutkan dari hasil terakhir: \`bondowoso resume ${task.id}\`, atau ulang dari awal: \`bondowoso reset ${task.id}\`.`);
+  }
 }
 
 function summarize(manifest: Manifest): number {
@@ -213,7 +303,7 @@ function summarize(manifest: Manifest): number {
     return 0;
   }
   log.warn(`${done} selesai, ${blocked} blocked, ${waiting} tertahan karena dependensinya blocked.`);
-  log.info("Lihat `bondowoso status`, perbaiki penyebabnya, lalu `bondowoso reset <id>` dan `bondowoso work`.");
+  log.info("Lihat `bondowoso status`, lalu `bondowoso resume <id>` atau `bondowoso reset <id>`, dan `bondowoso work`.");
   return 2;
 }
 

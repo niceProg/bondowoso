@@ -7,7 +7,7 @@ import { log } from "./log.ts";
 import { init } from "./pipeline/init.ts";
 import { approve, plan } from "./pipeline/plan.ts";
 import { reset, status } from "./pipeline/status.ts";
-import { work } from "./pipeline/work.ts";
+import { resume, work } from "./pipeline/work.ts";
 
 const program = new Command()
   .name("bondowoso")
@@ -53,8 +53,14 @@ program
   .action(() => status(ctx()));
 
 program
+  .command("resume")
+  .description("pasang lagi hasil percobaan terakhir tugas blocked, tambal manual, lalu `work`")
+  .argument("<id>", "id tugas, mis. T3")
+  .action((id: string) => resume(ctx(), id));
+
+program
   .command("reset")
-  .description("kembalikan tugas blocked ke pending")
+  .description("ulang tugas blocked dari awal")
   .argument("<id>", "id tugas, mis. T3")
   .action((id: string) => reset(ctx(), id));
 

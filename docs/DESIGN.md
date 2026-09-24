@@ -50,7 +50,8 @@ bondowoso plan "<permintaan>"   # Lead menjelajah repo → .bondowoso/plan.md
 bondowoso approve               # Lead memecah plan.md → tasks di manifest.yaml
 bondowoso work                  # jalankan tugas pending sampai habis / terhenti
 bondowoso status                # tabel tugas + status + attempt
-bondowoso reset <task-id>       # kembalikan tugas ke pending
+bondowoso resume <task-id>      # pasang lagi patch terakhir tugas blocked, lanjutkan
+bondowoso reset <task-id>       # ulang tugas dari awal
 ```
 
 ### Alur per tugas di `bondowoso work`
@@ -235,8 +236,14 @@ Catatan penting (sudah dicek di mesin ini, Claude Code 2.1.281):
   `main` langsung memicu deploy produksi.
 - Pertama kali jalan: buat branch `bondowoso/<slug-permintaan>` dari HEAD.
 - Satu commit per tugas yang lolos, pesan `T3: <judul tugas>`.
-- Tugas yang gagal/blocked: perubahannya di-stash atau di-reset ke commit
-  terakhir, sehingga tugas berikutnya mulai dari keadaan bersih.
+- Tugas yang gagal/blocked/terputus: diff-nya (termasuk file baru dan hasil
+  `git rm`/`git mv`) disimpan sebagai patch `runs/<run>/<id>-attempt-<n>.patch`,
+  lalu working tree dikembalikan ke commit terakhir. `bondowoso resume <id>`
+  memasang patch itu lagi; setelah manusia menambal, `work` langsung menjalankan
+  gate → Reviewer tanpa Developer, dan Developer baru dipanggil kalau ada yang menolak.
+- Developer boleh `git rm`/`git mv` (hanya menyentuh file yang dilacak git, jadi
+  selalu bisa dipulihkan). Daftar `developer_bash` ikut dimasukkan ke prompt-nya
+  supaya tidak membuang giliran menebak perintah yang diizinkan.
 - Merge ke branch utama dilakukan **manusia**.
 
 ---

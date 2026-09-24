@@ -31,13 +31,19 @@ const rejectReview = {
 let repo = "";
 let scriptPath = "";
 
-function setup(script: Record<string, unknown[]>, limits: Record<string, number> = {}): void {
+interface SetupExtra {
+  files?: Record<string, string>; // file tracked tambahan di commit awal
+  developer_bash?: string[];
+}
+
+function setup(script: Record<string, unknown[]>, limits: Record<string, number> = {}, extra: SetupExtra = {}): void {
   repo = mkdtempSync(join(tmpdir(), "bondowoso-test-"));
   const g = (...args: string[]) => spawnSync("git", args, { cwd: repo, encoding: "utf8" });
   g("init", "-q", "-b", "main");
   g("config", "user.email", "test@example.com");
   g("config", "user.name", "Test");
   writeFileSync(join(repo, "README.md"), "# repo\n");
+  for (const [path, content] of Object.entries(extra.files ?? {})) writeFileSync(join(repo, path), content);
   g("add", ".");
   g("commit", "-q", "-m", "awal");
   // File untracked milik user: tidak boleh dihapus atau ikut ter-commit.
@@ -58,6 +64,7 @@ function setup(script: Record<string, unknown[]>, limits: Record<string, number>
         reviewer: { model: "fake", effort: "medium" },
       },
       limits,
+      developer_bash: extra.developer_bash ?? [],
     }),
   );
   scriptPath = join(repo, "..", `${repo.split("/").pop()}-script.json`);
@@ -160,6 +167,8 @@ describe("pipeline", () => {
     expect(manifest().tasks[0]).toMatchObject({ status: "pending", attempts: 0 });
     expect(existsSync(join(repo, "app.txt"))).toBe(false);
     expect(existsSync(join(repo, "notes.txt"))).toBe(true);
+    // Pekerjaan setengah jadi tidak hilang: tersimpan sebagai patch.
+    expect(readFileSync(join(repo, ".bondowoso", manifest().tasks[0].last_patch), "utf8")).toContain("+setengah");
 
     const second = cli("work");
     expect(second.code, second.out).toBe(0);
@@ -245,5 +254,166 @@ describe("pipeline", () => {
     const r = cli("work");
     expect(r.code).toBe(1);
     expect(r.out).toContain("plan.md berubah setelah approve");
+  });
+});
+
+function gitOut(...args: string[]): string {
+  return spawnSync("git", args, { cwd: repo, encoding: "utf8" }).stdout.trim();
+}
+
+const blockedDev = (reason: string, extra: Record<string, unknown> = {}) => ({
+  ...extra,
+  output: { status: "blocked", summary: "Sebagian selesai.", blocked_reason: reason },
+});
+
+describe("macet dan dilanjutkan", () => {
+  it("blocked menyimpan patch + aksi yang ditolak; resume + tambal manual lalu work meng-commit tanpa Developer", () => {
+    setup(
+      {
+        lead: [{ output: PLAN }, { output: { tasks: [task("T1")] } }],
+        developer: [
+          blockedDev("tidak bisa menghapus old.txt", {
+            write: { "app.txt": "good\n", "lib/new.txt": "baru\n" },
+            denials: [
+              { tool_name: "Bash", tool_input: { command: "rm old.txt" } },
+              { tool_name: "Bash", tool_input: { command: "cd lib && python3 -c 'import os'" } },
+            ],
+          }),
+        ],
+        reviewer: [approveReview],
+      },
+      {},
+      { files: { "old.txt": "lama\n" } },
+    );
+    cli("plan", "fitur");
+    cli("approve");
+
+    const first = cli("work");
+    expect(first.code, first.out).toBe(2);
+    expect(first.out).toContain("rm old.txt");
+    expect(first.out).toContain('"rm:*"');
+    expect(first.out).toContain('"python3:*"');
+    expect(first.out).toContain("bondowoso resume T1");
+    expect(existsSync(join(repo, "app.txt"))).toBe(false);
+    expect(manifest().tasks[0].denied).toEqual(["rm old.txt", "cd lib && python3 -c 'import os'"]);
+    expect(cli("status").out).toContain("bondowoso resume T1");
+
+    const resumed = cli("resume", "T1");
+    expect(resumed.code, resumed.out).toBe(0);
+    expect(readFileSync(join(repo, "app.txt"), "utf8")).toBe("good\n");
+    expect(readFileSync(join(repo, "lib/new.txt"), "utf8")).toBe("baru\n");
+    expect(manifest().tasks[0].status).toBe("resumed");
+
+    // Manusia menambal bagian yang tidak bisa dikerjakan agent.
+    rmSync(join(repo, "old.txt"));
+
+    const second = cli("work");
+    expect(second.code, second.out).toBe(0);
+    expect(calls("developer")).toHaveLength(1);
+    const review = calls("reviewer")[0].prompt;
+    expect(review).toContain("bondowoso resume");
+    expect(review).toContain("deleted file mode");
+    expect(committedFiles()).toEqual(expect.arrayContaining(["app.txt", "lib/new.txt"]));
+    expect(committedFiles()).not.toContain("old.txt");
+    expect(committedFiles()).not.toContain("notes.txt");
+    expect(manifest().tasks[0]).toMatchObject({ status: "done", attempts: 1 });
+  });
+
+  it("tugas hasil resume yang gagal gate diteruskan ke Developer dengan working tree utuh", () => {
+    setup(
+      {
+        lead: [{ output: PLAN }, { output: { tasks: [task("T1")] } }],
+        developer: [blockedDev("macet", { write: { "app.txt": "bad\n", "extra.txt": "x\n" } }), dev({ "app.txt": "good\n" })],
+        reviewer: [approveReview],
+      },
+    );
+    cli("plan", "fitur");
+    cli("approve");
+    expect(cli("work").code).toBe(2);
+    expect(cli("resume", "T1").code).toBe(0);
+
+    const r = cli("work");
+    expect(r.code, r.out).toBe(0);
+    expect(calls("developer")[1].prompt).toContain('Gate "app" gagal');
+    // extra.txt dari patch tetap ada dan ikut ter-commit bersama perbaikan Developer.
+    expect(committedFiles()).toEqual(expect.arrayContaining(["app.txt", "extra.txt"]));
+  });
+
+  it("reset tugas yang sedang di-resume membersihkan working tree", () => {
+    setup({
+      lead: [{ output: PLAN }, { output: { tasks: [task("T1")] } }],
+      developer: [blockedDev("macet", { write: { "app.txt": "good\n" } })],
+      reviewer: [],
+    });
+    cli("plan", "fitur");
+    cli("approve");
+    cli("work");
+    cli("resume", "T1");
+    expect(existsSync(join(repo, "app.txt"))).toBe(true);
+
+    expect(cli("reset", "T1").code).toBe(0);
+    expect(existsSync(join(repo, "app.txt"))).toBe(false);
+    expect(existsSync(join(repo, "notes.txt"))).toBe(true);
+    expect(manifest().tasks[0].status).toBe("pending");
+  });
+
+  it("git rm dan git mv dari Developer ikut ter-commit, dan bisa di-rollback + resume", () => {
+    setup(
+      {
+        lead: [{ output: PLAN }, { output: { tasks: [task("T1"), task("T2")] } }],
+        developer: [
+          { ...dev({}), run: ["git mv old.txt moved.txt", "git rm -q gone.txt"] },
+          blockedDev("macet", { run: ["git rm -q keep.txt"], write: { "app.txt": "good\n" } }),
+        ],
+        reviewer: [approveReview],
+      },
+      {},
+      { files: { "old.txt": "lama\n", "gone.txt": "hapus\n", "keep.txt": "tetap\n" }, developer_bash: ["git rm:*", "git mv:*"] },
+    );
+    cli("plan", "fitur");
+    cli("approve");
+
+    const r = cli("work");
+    expect(r.code, r.out).toBe(2);
+    expect(committedFiles()).toEqual(expect.arrayContaining(["moved.txt", "keep.txt"]));
+    expect(committedFiles()).not.toContain("old.txt");
+    expect(committedFiles()).not.toContain("gone.txt");
+    // T2 di-rollback: keep.txt kembali, app.txt hilang, index bersih.
+    expect(readFileSync(join(repo, "keep.txt"), "utf8")).toBe("tetap\n");
+    expect(existsSync(join(repo, "app.txt"))).toBe(false);
+    expect(gitOut("status", "--porcelain", "--untracked-files=no")).toBe("");
+
+    // Izin git rm/mv diberitahukan ke Developer di system prompt.
+    const args = calls("developer")[0].args;
+    expect(args[args.indexOf("--append-system-prompt") + 1]).toContain("- `git rm …`");
+
+    expect(cli("resume", "T2").code).toBe(0);
+    expect(existsSync(join(repo, "keep.txt"))).toBe(false);
+    expect(existsSync(join(repo, "app.txt"))).toBe(true);
+  });
+
+  it("resume ditolak untuk tugas tanpa patch", () => {
+    setup({ lead: [{ output: PLAN }, { output: { tasks: [task("T1")] } }], developer: [], reviewer: [] });
+    cli("plan", "fitur");
+    cli("approve");
+    const r = cli("resume", "T1");
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("Tidak ada patch tersimpan");
+  });
+});
+
+describe("init", () => {
+  it("mengizinkan git read-only, git rm/mv, dan eslint kalau dipakai", () => {
+    repo = mkdtempSync(join(tmpdir(), "bondowoso-test-"));
+    spawnSync("git", ["init", "-q"], { cwd: repo });
+    mkdirSync(join(repo, "web"));
+    writeFileSync(join(repo, "web", "package.json"), JSON.stringify({ scripts: { build: "x" }, devDependencies: { eslint: "^9" } }));
+    scriptPath = join(repo, "..", `${repo.split("/").pop()}-script.json`);
+
+    expect(cli("init").code).toBe(0);
+    const config = parse(readFileSync(join(repo, ".bondowoso", "config.yaml"), "utf8"));
+    expect(config.developer_bash).toEqual(
+      expect.arrayContaining(["git status:*", "git diff:*", "git rm:*", "git mv:*", "npx eslint:*", "npm run:*"]),
+    );
   });
 });

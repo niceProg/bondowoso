@@ -14,7 +14,9 @@ interface DetectedGate {
 // api/ + web/), lalu tebak gate dan izin Bash Developer dari sana.
 function detect(root: string): { gates: DetectedGate[]; bash: Set<string> } {
   const gates: DetectedGate[] = [];
-  const bash = new Set<string>();
+  // Git read-only tidak otomatis lolos di mode dontAsk. `git rm`/`git mv` hanya
+  // menyentuh file yang dilacak git, jadi selalu bisa dipulihkan.
+  const bash = new Set<string>(["git status:*", "git diff:*", "git log:*", "git show:*", "git rm:*", "git mv:*"]);
   const dirs = ["."];
   for (const entry of readdirSync(root, { withFileTypes: true })) {
     if (entry.isDirectory() && !entry.name.startsWith(".") && entry.name !== "node_modules") dirs.push(entry.name);
@@ -30,7 +32,9 @@ function detect(root: string): { gates: DetectedGate[]; bash: Set<string> } {
     }
     const pkgPath = join(abs, "package.json");
     if (existsSync(pkgPath)) {
-      const scripts: Record<string, string> = JSON.parse(readFileSync(pkgPath, "utf8")).scripts ?? {};
+      const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+      const scripts: Record<string, string> = pkg.scripts ?? {};
+      if (pkg.devDependencies?.eslint || pkg.dependencies?.eslint) bash.add("npx eslint:*");
       for (const s of ["lint", "typecheck", "test"]) {
         if (!scripts[s] || /no test specified/.test(scripts[s])) continue;
         gates.push({ name: `${prefix}${s}`, cwd: dir, run: s === "test" ? "npm test" : `npm run ${s}` });
