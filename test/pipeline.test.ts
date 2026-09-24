@@ -203,6 +203,35 @@ describe("pipeline", () => {
     expect(r.out).toContain("Gate sudah gagal sebelum ada perubahan");
   });
 
+  it("plan --file membaca permintaan multi-baris dari file", () => {
+    setup({ lead: [{ output: PLAN }], developer: [], reviewer: [] });
+    const file = join(repo, "..", `${repo.split("/").pop()}-permintaan.md`);
+    writeFileSync(file, "<!-- catatan -->\nTambah filter tanggal\n\n- dari\n- sampai\n");
+
+    const r = cli("plan", "--file", file);
+    rmSync(file);
+    expect(r.code, r.out).toBe(0);
+    expect(calls("lead")[0].prompt).toContain("Tambah filter tanggal\n\n- dari\n- sampai");
+    expect(calls("lead")[0].prompt).not.toContain("catatan");
+    const planMd = readFileSync(join(repo, ".bondowoso", "plan.md"), "utf8");
+    expect(planMd).toMatch(/^# Rencana: Tambah filter tanggal\n/);
+    expect(planMd).toContain("## Permintaan");
+  });
+
+  it("plan menolak teks dan --file sekaligus", () => {
+    setup({ lead: [], developer: [], reviewer: [] });
+    const r = cli("plan", "--file", "x.md", "fitur");
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("jangan keduanya");
+  });
+
+  it("plan tanpa teks di luar terminal memberi petunjuk, bukan membuka editor", () => {
+    setup({ lead: [], developer: [], reviewer: [] });
+    const r = cli("plan");
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("--file");
+  });
+
   it("menolak work kalau plan.md diedit setelah approve", () => {
     setup({
       lead: [{ output: PLAN }, { output: { tasks: [task("T1")] } }],

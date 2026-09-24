@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, type Ctx } from "../config.ts";
 import { log } from "../log.ts";
 import { hasManifest, loadManifest, saveManifest, validateTaskGraph, type Manifest } from "../manifest.ts";
 import { leadDecomposeRequest, leadPlanRequest } from "../roles.ts";
+import { draftPath, readRequest, type RequestSource } from "../request.ts";
 import { runAgent } from "../runner/claude.ts";
 
 export function planHash(ctx: Ctx): string {
@@ -15,7 +16,7 @@ export function runDir(ctx: Ctx, manifest: Pick<Manifest, "run_id">): string {
   return join(ctx.runsDir, manifest.run_id);
 }
 
-export async function plan(ctx: Ctx, request: string, opts: { force: boolean }): Promise<void> {
+export async function plan(ctx: Ctx, source: RequestSource, opts: { force: boolean }): Promise<void> {
   const config = loadConfig(ctx);
   if (hasManifest(ctx) && !opts.force) {
     const old = loadManifest(ctx);
@@ -24,6 +25,9 @@ export async function plan(ctx: Ctx, request: string, opts: { force: boolean }):
       throw new Error(`Run ${old.run_id} masih punya tugas yang belum selesai. Pakai --force untuk membuang rencana itu.`);
     }
   }
+  // Setelah pengecekan di atas, supaya editor tidak terbuka untuk plan yang
+  // toh akan ditolak.
+  const request = readRequest(ctx, source);
 
   const now = new Date();
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -36,13 +40,18 @@ export async function plan(ctx: Ctx, request: string, opts: { force: boolean }):
     leadPlanRequest(ctx, config, request, join(runDir(ctx, manifest), "lead-plan.json")),
   );
 
-  const lines = [`# Rencana: ${request}`, "", `**Scope:** ${output.scope}`, "", output.summary, "", output.plan_markdown.trim()];
+  const [title, ...rest] = request.split("\n");
+  const lines = [`# Rencana: ${title.trim()}`, "", `**Scope:** ${output.scope}`, ""];
+  // Permintaan multi-baris (dari editor/--file) tidak muat di judul.
+  if (rest.some((l) => l.trim())) lines.push("## Permintaan", "", request, "");
+  lines.push(output.summary, "", output.plan_markdown.trim());
   if (output.open_questions.length) {
     lines.push("", "## Pertanyaan terbuka", "", ...output.open_questions.map((q) => `- ${q}`));
   }
   writeFileSync(ctx.planPath, `${lines.join("\n")}\n`);
   manifest.scope = output.scope;
   saveManifest(ctx, manifest);
+  if (source.words.length === 0 && !source.file) rmSync(draftPath(ctx), { force: true });
 
   log.ok(`Rencana ditulis ke ${ctx.planPath} (scope: ${output.scope}, estimasi harga list $${costUsd.toFixed(2)})`);
   if (output.open_questions.length) {

@@ -26,9 +26,12 @@ program
 program
   .command("plan")
   .description("Lead menjelajah repo dan menulis .bondowoso/plan.md")
-  .argument("<request...>", "permintaan fitur atau perbaikan")
+  .argument("[request...]", "permintaan fitur atau perbaikan; kosongkan untuk menulis di $EDITOR")
+  .option("-f, --file <path>", "baca permintaan dari file (mis. permintaan.md)")
   .option("--force", "buang run lama yang belum selesai")
-  .action((words: string[], opts: { force?: boolean }) => plan(ctx(), words.join(" "), { force: !!opts.force }));
+  .action((words: string[], opts: { file?: string; force?: boolean }) =>
+    plan(ctx(), { words, file: opts.file }, { force: !!opts.force }),
+  );
 
 program
   .command("approve")

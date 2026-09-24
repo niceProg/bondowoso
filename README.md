@@ -36,6 +36,18 @@ bondowoso reset <id>            # kembalikan tugas blocked ke pending
 
 Dari luar repo, pakai `-C`: `bondowoso -C <repo> status`.
 
+Tiga cara menulis permintaan untuk `plan`:
+
+```bash
+bondowoso plan "Tambah filter tanggal di daftar event"   # satu baris
+bondowoso plan                                          # buka $EDITOR (mis. nvim)
+bondowoso plan --file permintaan.md                     # dari file Markdown
+```
+
+Di editor dan file, blok `<!-- komentar -->` diabaikan. Draf dari editor disimpan
+di `.bondowoso/request.md`; kalau plan gagal, draf itu dibuka lagi pada
+`bondowoso plan` berikutnya.
+
 Kode keluar `work`: `0` semua selesai, `2` ada tugas blocked, `75` kuota Max habis
 (jalankan `work` lagi nanti untuk melanjutkan), `1` error lain.
 
