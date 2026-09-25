@@ -3,6 +3,7 @@ import { nextTask, validateTaskGraph, type Manifest, type TaskSpec } from "../sr
 import { buildArgs, parseResetTime } from "../src/runner/claude.ts";
 import { DeveloperOutput } from "../src/roles.ts";
 import { describeDenials, mergeDenied, suggestPattern } from "../src/denials.ts";
+import { acceptableBranch, cleanCommitMessage, fallbackBranch, parsePlanBranch, planBranchLine } from "../src/naming.ts";
 
 const spec = (id: string, depends_on: string[] = []): TaskSpec => ({
   id,
@@ -92,5 +93,25 @@ describe("denials", () => {
   });
   it("menggabungkan tanpa duplikat", () => {
     expect(mergeDenied(["a"], ["a", "b"])).toEqual(["a", "b"]);
+  });
+});
+
+describe("naming", () => {
+  it("membersihkan pesan commit dari id tugas dan trailer AI", () => {
+    expect(cleanCommitMessage("T3: fix(api): tangani nil\n\nBody.\n\nCo-Authored-By: Claude <a@b>\n🤖 Generated with [Claude Code](x)", "cadangan")).toBe(
+      "fix(api): tangani nil\n\nBody.",
+    );
+    expect(cleanCommitMessage("", "Judul tugas")).toBe("Judul tugas");
+    expect(cleanCommitMessage(undefined, "Judul tugas")).toBe("Judul tugas");
+  });
+  it("membaca dan menulis baris Branch di plan.md", () => {
+    expect(parsePlanBranch(`# Rencana\n\n${planBranchLine("feat/x-y")}\n`)).toBe("feat/x-y");
+    expect(parsePlanBranch("# tanpa branch")).toBeUndefined();
+  });
+  it("nama cadangan dipotong di batas kata dan tanpa nama orkestrator", () => {
+    expect(fallbackBranch("Redesign dashboard user yang lebih tertata, menarik")).toBe("feat/redesign-dashboard-user-yang-lebih");
+    expect(fallbackBranch("!!!")).toBe("feat/update");
+    expect(acceptableBranch("bondowoso/x")).toBe(false);
+    expect(acceptableBranch("feat/x")).toBe(true);
   });
 });

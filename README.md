@@ -65,8 +65,11 @@ bondowoso reset T1    # atau: buang dan ulang T1 dari awal
 Kode keluar `work`: `0` semua selesai, `2` ada tugas blocked, `75` kuota Max habis
 (jalankan `work` lagi nanti untuk melanjutkan), `1` error lain.
 
-Orkestrator tidak pernah push dan tidak pernah merge. Branch `bondowoso/<slug>`
-di-review dan di-merge oleh manusia.
+Orkestrator tidak pernah push dan tidak pernah merge. Hasilnya tidak membawa jejak
+orkestrator: nama branch diusulkan Lead mengikuti konvensi repo (mis.
+`feat/redesign-dashboard-user`, bisa diubah di baris **Branch:** `plan.md` sebelum
+approve), dan pesan commit ditulis Developer mengikuti gaya commit repo, tanpa id tugas
+dan tanpa trailer AI. Review, push, dan merge dilakukan manusia.
 
 ## Pengembangan
 

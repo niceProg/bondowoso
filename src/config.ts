@@ -38,11 +38,6 @@ export const ConfigSchema = z.object({
       max_diff_chars: z.number().int().positive().default(150_000),
     })
     .prefault({}),
-  git: z
-    .object({
-      branch_prefix: z.string().default("bondowoso/"),
-    })
-    .prefault({}),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

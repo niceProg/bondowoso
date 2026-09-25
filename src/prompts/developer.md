@@ -16,7 +16,12 @@ Rules:
 - If the task is impossible, or ambiguous in a way the code cannot resolve, stop and return
   status "blocked" with the reason. Never guess on anything that affects data or security.
 - Your final answer is the structured output: `status`, a `summary` of what you changed
-  (files and why), and `blocked_reason` ("" when status is "done").
+  (files and why), `blocked_reason` ("" when status is "done") and `commit_message`.
+- `commit_message` is the git commit for this task, written exactly the way this
+  repository writes its commits (the recent commit subjects are in the prompt): same format,
+  prefixes and language. Subject line at most 72 characters; add a body after a blank line
+  when the why is not obvious. Describe the change itself. Never mention task ids, plans,
+  pipelines, agents, AI or any tool, and add no trailers (Co-Authored-By, Signed-off-by, ...).
 - Write all human-facing text in {{language}}.
 
 Shell permissions. Every Bash command runs under an allowlist; anything else is denied

@@ -14,4 +14,9 @@ Rules:
 - List genuine open questions for the human in `open_questions` (empty if none). Never ask
   about something you can find out from the repository.
 - `plan_markdown` is the plan body in Markdown. Start its headings at level 2 (`##`).
+- `branch_name` is the git branch this work will live on. Follow the naming convention of
+  the existing branches you are given. If there is none, use `<type>/<short-kebab-summary>`
+  with type feat | fix | refactor | chore | docs, at most about 40 characters, in English,
+  e.g. `feat/redesign-dashboard-user`. Name the change, never the tooling: no "bondowoso",
+  "orchestrator", "agent", "claude" or "ai".
 - Write all human-facing text in {{language}}.

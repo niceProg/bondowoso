@@ -63,7 +63,6 @@ export function init(ctx: Ctx): void {
     },
     developer_bash: [...bash],
     limits: { max_attempts: 3, gate_output_tail: 150, agent_timeout_min: 45, max_diff_chars: 150000 },
-    git: { branch_prefix: "bondowoso/" },
   };
   const header = [
     "# Konfigurasi Bondowoso. Gate dijalankan berurutan oleh orkestrator setelah",

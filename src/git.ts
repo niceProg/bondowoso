@@ -113,6 +113,21 @@ export function rollback(root: string, untrackedBefore: string[]): void {
   for (const file of newFiles(root, untrackedBefore)) rmSync(join(root, file), { force: true });
 }
 
-export function lastCommitSubject(root: string): string {
-  return git(root, ["log", "-1", "--format=%s"]).trim();
+export function parentOf(root: string, rev: string): string | undefined {
+  const r = run(root, ["rev-parse", "--verify", "--quiet", `${rev}^`]);
+  return r.code === 0 ? r.stdout.trim() : undefined;
+}
+
+export function recentSubjects(root: string, count: number): string[] {
+  const r = run(root, ["log", `-${count}`, "--no-merges", "--format=%s"]);
+  return r.code === 0 ? r.stdout.split("\n").filter(Boolean) : [];
+}
+
+export function branchNames(root: string, count: number): string[] {
+  const out = git(root, ["for-each-ref", "--sort=-committerdate", `--count=${count}`, "--format=%(refname:short)", "refs/heads", "refs/remotes"]);
+  return out.split("\n").filter((b) => b && !b.endsWith("/HEAD"));
+}
+
+export function isValidBranchName(root: string, name: string): boolean {
+  return run(root, ["check-ref-format", "--branch", name]).code === 0;
 }

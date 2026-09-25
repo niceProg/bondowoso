@@ -9,7 +9,13 @@ const ROOT = join(import.meta.dirname, "..");
 const CLI = join(ROOT, "src", "cli.ts");
 const FAKE = join(ROOT, "test", "fake-claude.ts");
 
-const PLAN = { scope: "small", summary: "Ringkasan.", plan_markdown: "## Langkah\n\n- ubah app.txt", open_questions: [] };
+const PLAN = {
+  scope: "small",
+  summary: "Ringkasan.",
+  plan_markdown: "## Langkah\n\n- ubah app.txt",
+  open_questions: [],
+  branch_name: "feat/tambah-fitur-app",
+};
 const task = (id: string, depends_on: string[] = []) => ({
   id,
   title: `Tugas ${id}`,
@@ -18,7 +24,10 @@ const task = (id: string, depends_on: string[] = []) => ({
   files_hint: ["app.txt"],
   depends_on,
 });
-const dev = (write: Record<string, string>) => ({ write, output: { status: "done", summary: "Ubah file.", blocked_reason: "" } });
+const dev = (write: Record<string, string>, commit_message = "feat: ubah file") => ({
+  write,
+  output: { status: "done", summary: "Ubah file.", blocked_reason: "", commit_message },
+});
 const approveReview = { output: { verdict: "approve", summary: "Oke.", issues: [] } };
 const rejectReview = {
   output: {
@@ -106,22 +115,40 @@ afterEach(() => {
   }
 });
 
+function gitOut(...args: string[]): string {
+  return spawnSync("git", args, { cwd: repo, encoding: "utf8" }).stdout.trim();
+}
+
 describe("pipeline", () => {
   it("plan → approve → work sampai semua tugas ter-commit", () => {
     setup({
       lead: [{ output: PLAN }, { output: { tasks: [task("T1"), task("T2", ["T1"])] } }],
-      developer: [dev({ "app.txt": "good\n" }), dev({ "lib/util.txt": "util\n" })],
+      developer: [
+        dev({ "app.txt": "good\n" }, "T1: feat(app): tambah app.txt"),
+        dev({ "lib/util.txt": "util\n" }, "feat(util): tambah util\n\nAlasannya di sini.\n\nCo-Authored-By: Claude <noreply@anthropic.com>"),
+      ],
       reviewer: [approveReview, approveReview],
     });
 
     expect(cli("plan", "tambah", "fitur", "app").code).toBe(0);
-    expect(readFileSync(join(repo, ".bondowoso", "plan.md"), "utf8")).toContain("## Langkah");
+    const planMd = readFileSync(join(repo, ".bondowoso", "plan.md"), "utf8");
+    expect(planMd).toContain("## Langkah");
+    expect(planMd).toContain("**Branch:** `feat/tambah-fitur-app`");
+    // Konvensi repo ikut dikirim ke Lead dan Developer.
+    expect(calls("lead")[0].prompt).toMatch(/Existing branches[\s\S]*- main/);
+    expect(calls("lead")[0].prompt).toMatch(/Recent commit subjects[\s\S]*- awal/);
     expect(cli("approve").code).toBe(0);
 
     const r = cli("work");
     expect(r.code, r.out).toBe(0);
-    expect(gitLog().slice(0, 2)).toEqual(["T2: Tugas T2", "T1: Tugas T1"]);
-    expect(manifest().branch).toBe("bondowoso/tambah-fitur-app");
+    // Pesan commit dari Developer, tanpa id tugas dan tanpa trailer AI.
+    expect(gitLog().slice(0, 2)).toEqual(["feat(util): tambah util", "feat(app): tambah app.txt"]);
+    const body = gitOut("log", "-1", "--format=%B");
+    expect(body).toContain("Alasannya di sini.");
+    expect(body).not.toMatch(/co-authored-by|bondowoso/i);
+    expect(calls("developer")[0].prompt).toMatch(/Recent commit subjects in this repository[\s\S]*- awal/);
+    expect(manifest().branch).toBe("feat/tambah-fitur-app");
+    expect(gitOut("branch", "--show-current")).toBe("feat/tambah-fitur-app");
     expect(manifest().tasks.map((t: any) => t.status)).toEqual(["done", "done"]);
     expect(committedFiles()).toEqual(expect.arrayContaining(["app.txt", "lib/util.txt"]));
     expect(committedFiles()).not.toContain("notes.txt");
@@ -241,6 +268,38 @@ describe("pipeline", () => {
     expect(r.out).toContain("--file");
   });
 
+  it("nama branch di plan.md boleh diedit sebelum approve", () => {
+    setup({
+      lead: [{ output: PLAN }, { output: { tasks: [task("T1")] } }],
+      developer: [dev({ "app.txt": "good\n" })],
+      reviewer: [approveReview],
+    });
+    cli("plan", "fitur");
+    const planPath = join(repo, ".bondowoso", "plan.md");
+    writeFileSync(planPath, readFileSync(planPath, "utf8").replace("feat/tambah-fitur-app", "feat/redesign-dashboard-user"));
+    cli("approve");
+
+    const r = cli("work");
+    expect(r.code, r.out).toBe(0);
+    expect(manifest().branch).toBe("feat/redesign-dashboard-user");
+  });
+
+  it("nama branch yang menyebut orkestrator diganti cadangan, dan bentrok nama diberi akhiran", () => {
+    setup({
+      lead: [{ output: { ...PLAN, branch_name: "bondowoso/run-1" } }, { output: { tasks: [task("T1")] } }],
+      developer: [dev({ "app.txt": "good\n" })],
+      reviewer: [approveReview],
+    });
+    spawnSync("git", ["branch", "feat/redesign-dashboard-user-yang-lebih"], { cwd: repo });
+    cli("plan", "Redesign", "dashboard", "user", "yang", "lebih", "tertata");
+    expect(readFileSync(join(repo, ".bondowoso", "plan.md"), "utf8")).toContain("`feat/redesign-dashboard-user-yang-lebih`");
+    cli("approve");
+
+    const r = cli("work");
+    expect(r.code, r.out).toBe(0);
+    expect(manifest().branch).toBe("feat/redesign-dashboard-user-yang-lebih-2");
+  });
+
   it("menolak work kalau plan.md diedit setelah approve", () => {
     setup({
       lead: [{ output: PLAN }, { output: { tasks: [task("T1")] } }],
@@ -257,13 +316,10 @@ describe("pipeline", () => {
   });
 });
 
-function gitOut(...args: string[]): string {
-  return spawnSync("git", args, { cwd: repo, encoding: "utf8" }).stdout.trim();
-}
 
 const blockedDev = (reason: string, extra: Record<string, unknown> = {}) => ({
   ...extra,
-  output: { status: "blocked", summary: "Sebagian selesai.", blocked_reason: reason },
+  output: { status: "blocked", summary: "Sebagian selesai.", blocked_reason: reason, commit_message: "feat: tambah app dan hapus old" },
 });
 
 describe("macet dan dilanjutkan", () => {
@@ -317,6 +373,8 @@ describe("macet dan dilanjutkan", () => {
     expect(committedFiles()).not.toContain("old.txt");
     expect(committedFiles()).not.toContain("notes.txt");
     expect(manifest().tasks[0]).toMatchObject({ status: "done", attempts: 1 });
+    // Tanpa Developer di percobaan ini, pesan commit dari percobaan sebelumnya dipakai.
+    expect(gitLog()[0]).toBe("feat: tambah app dan hapus old");
   });
 
   it("tugas hasil resume yang gagal gate diteruskan ke Developer dengan working tree utuh", () => {

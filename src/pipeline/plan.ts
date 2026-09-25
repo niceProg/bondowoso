@@ -5,11 +5,17 @@ import { loadConfig, type Ctx } from "../config.ts";
 import { log } from "../log.ts";
 import { hasManifest, loadManifest, saveManifest, validateTaskGraph, type Manifest } from "../manifest.ts";
 import { leadDecomposeRequest, leadPlanRequest } from "../roles.ts";
+import { isValidBranchName } from "../git.ts";
+import { acceptableBranch, fallbackBranch, parsePlanBranch, planBranchLine } from "../naming.ts";
 import { draftPath, readRequest, type RequestSource } from "../request.ts";
 import { runAgent } from "../runner/claude.ts";
 
 export function planHash(ctx: Ctx): string {
   return createHash("sha256").update(readFileSync(ctx.planPath)).digest("hex").slice(0, 16);
+}
+
+function usableBranch(ctx: Ctx, name: string | undefined): string | undefined {
+  return acceptableBranch(name) && isValidBranchName(ctx.root, name) ? name : undefined;
 }
 
 export function runDir(ctx: Ctx, manifest: Pick<Manifest, "run_id">): string {
@@ -40,8 +46,9 @@ export async function plan(ctx: Ctx, source: RequestSource, opts: { force: boole
     leadPlanRequest(ctx, config, request, join(runDir(ctx, manifest), "lead-plan.json")),
   );
 
+  const branch = usableBranch(ctx, output.branch_name.trim()) ?? fallbackBranch(request);
   const [title, ...rest] = request.split("\n");
-  const lines = [`# Rencana: ${title.trim()}`, "", `**Scope:** ${output.scope}`, ""];
+  const lines = [`# Rencana: ${title.trim()}`, "", `**Scope:** ${output.scope}  `, planBranchLine(branch), ""];
   // Permintaan multi-baris (dari editor/--file) tidak muat di judul.
   if (rest.some((l) => l.trim())) lines.push("## Permintaan", "", request, "");
   lines.push(output.summary, "", output.plan_markdown.trim());
@@ -50,10 +57,12 @@ export async function plan(ctx: Ctx, source: RequestSource, opts: { force: boole
   }
   writeFileSync(ctx.planPath, `${lines.join("\n")}\n`);
   manifest.scope = output.scope;
+  manifest.branch_name = branch;
   saveManifest(ctx, manifest);
   if (source.words.length === 0 && !source.file) rmSync(draftPath(ctx), { force: true });
 
   log.ok(`Rencana ditulis ke ${ctx.planPath} (scope: ${output.scope}, estimasi harga list $${costUsd.toFixed(2)})`);
+  log.info(`Usulan branch: ${branch} (ubah baris **Branch:** di plan.md kalau mau nama lain)`);
   if (output.open_questions.length) {
     log.warn(`Ada ${output.open_questions.length} pertanyaan terbuka. Jawab langsung di plan.md sebelum approve.`);
   }
@@ -69,6 +78,12 @@ export async function approve(ctx: Ctx, opts: { force: boolean }): Promise<void>
   }
 
   const planText = readFileSync(ctx.planPath, "utf8");
+  const edited = parsePlanBranch(planText);
+  if (edited && usableBranch(ctx, edited)) {
+    manifest.branch_name = edited;
+  } else if (edited) {
+    log.warn(`Nama branch "${edited}" di plan.md tidak valid; tetap memakai ${manifest.branch_name ?? fallbackBranch(manifest.request)}.`);
+  }
   log.step(`Lead (${config.roles.lead.model}) memecah rencana menjadi tugas…`);
   const { output } = await runAgent(
     leadDecomposeRequest(ctx, config, planText, join(runDir(ctx, manifest), "lead-decompose.json")),

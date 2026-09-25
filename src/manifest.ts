@@ -33,6 +33,11 @@ const TaskSchema = TaskSpecSchema.extend({
   last_patch: z.string().optional(),
   // Perintah/tool yang ditolak permission selama tugas ini, tanpa duplikat.
   denied: z.array(z.string()).optional(),
+  // Pesan commit terakhir yang diusulkan Developer; dipakai lagi setelah resume.
+  commit_message: z.string().optional(),
+  // HEAD tepat sebelum commit tugas ini, untuk mengenali commit yang sempat
+  // dibuat sebelum proses terputus tanpa menandai pesan commit.
+  commit_base: z.string().optional(),
   history: z.array(HistoryEntry),
 });
 
@@ -41,6 +46,8 @@ const ManifestSchema = z.object({
   request: z.string(),
   scope: z.string().optional(),
   branch: z.string().optional(),
+  // Usulan nama branch dari plan.md; dipakai saat branch pertama kali dibuat.
+  branch_name: z.string().optional(),
   base_commit: z.string().optional(),
   plan_hash: z.string().optional(),
   baseline_ok: z.boolean().optional(),

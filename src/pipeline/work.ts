@@ -6,6 +6,7 @@ import { describeDenials, formatDenied, mergeDenied } from "../denials.ts";
 import { formatGateFailures, gateLog, runGates } from "../gates.ts";
 import * as git from "../git.ts";
 import { log } from "../log.ts";
+import { cleanCommitMessage, fallbackBranch } from "../naming.ts";
 import { loadManifest, nextTask, record, saveManifest, type Manifest, type Task } from "../manifest.ts";
 import { developerRequest, formatReview, reviewerRequest } from "../roles.ts";
 import { RateLimitError, runAgent } from "../runner/claude.ts";
@@ -45,7 +46,7 @@ export async function work(ctx: Ctx, opts: WorkOptions): Promise<number> {
   recoverInterrupted(ctx, manifest);
   // Tugas yang di-resume memang membawa perubahan di working tree.
   if (!resumed) assertClean(root);
-  if (!manifest.branch) createBranch(ctx, config, manifest);
+  if (!manifest.branch) createBranch(ctx, manifest);
 
   if (!manifest.baseline_ok && !resumed) {
     log.step("Menjalankan gate pada kondisi awal (baseline)…");
@@ -148,17 +149,10 @@ function assertClean(root: string): void {
   }
 }
 
-function createBranch(ctx: Ctx, config: Config, manifest: Manifest): void {
-  const slug =
-    manifest.request
-      .toLowerCase()
-      .normalize("NFKD")
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 40)
-      .replace(/-+$/, "") || "run";
-  let name = `${config.git.branch_prefix}${slug}`;
-  if (git.branchExists(ctx.root, name)) name = `${name}-${manifest.run_id.slice(0, 10)}`;
+function createBranch(ctx: Ctx, manifest: Manifest): void {
+  const base = manifest.branch_name ?? fallbackBranch(manifest.request);
+  let name = base;
+  for (let i = 2; git.branchExists(ctx.root, name); i++) name = `${base}-${i}`;
   manifest.base_commit = git.head(ctx.root);
   git.switchBranch(ctx.root, name, true);
   manifest.branch = name;
@@ -167,11 +161,14 @@ function createBranch(ctx: Ctx, config: Config, manifest: Manifest): void {
 }
 
 // Tugas yang masih in_progress berarti proses sebelumnya terputus (Ctrl+C,
-// crash, laptop mati). Kalau commit-nya sempat dibuat, tandai selesai;
-// kalau belum, simpan sisa perubahannya sebagai patch lalu bersihkan.
+// crash, laptop mati). Kalau commit-nya sempat dibuat (HEAD tepat satu commit
+// di atas commit_base), tandai selesai; kalau belum, simpan sisa perubahannya
+// sebagai patch lalu bersihkan.
 function recoverInterrupted(ctx: Ctx, manifest: Manifest): void {
   for (const task of manifest.tasks.filter((t) => t.status === "in_progress")) {
-    if (git.lastCommitSubject(ctx.root).startsWith(`${task.id}:`)) {
+    const head = git.head(ctx.root);
+    if (task.commit_base && head !== task.commit_base && git.parentOf(ctx.root, head) === task.commit_base) {
+      delete task.commit_base;
       task.status = "done";
       task.commit = git.head(ctx.root).slice(0, 7);
       log.info(`${task.id} ternyata sudah ter-commit sebelum terputus`);
@@ -214,6 +211,7 @@ async function runTask(ctx: Ctx, config: Config, manifest: Manifest, task: Task,
         developerRequest(ctx, config, manifest, task, plan, task.feedback ?? "", logPath(ctx, manifest, task, "developer", n, "json")),
       );
       summary = dev.output.summary;
+      if (dev.output.commit_message.trim()) task.commit_message = dev.output.commit_message;
       const denied = describeDenials(dev.denials);
       if (denied.length) {
         task.denied = mergeDenied(task.denied, denied);
@@ -253,10 +251,13 @@ async function runTask(ctx: Ctx, config: Config, manifest: Manifest, task: Task,
       continue;
     }
 
-    const commit = git.commitTask(root, task.untracked_before ?? [], `${task.id}: ${task.title}\n\n${summary}`);
+    task.commit_base = git.head(root);
+    saveManifest(ctx, manifest);
+    const commit = git.commitTask(root, task.untracked_before ?? [], cleanCommitMessage(task.commit_message, task.title));
     task.status = "done";
     task.commit = commit;
     delete task.feedback;
+    delete task.commit_base;
     record(task, "commit", n, commit ?? "no-changes");
     saveManifest(ctx, manifest);
     log.ok(`${task.id} selesai${commit ? ` (commit ${commit})` : " (tanpa perubahan)"}`);

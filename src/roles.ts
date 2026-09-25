@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import type { Config, Ctx, RoleName } from "./config.ts";
+import { branchNames, recentSubjects } from "./git.ts";
 import { TaskSpecSchema, type Manifest, type Task } from "./manifest.ts";
 import type { AgentRequest } from "./runner/claude.ts";
 
@@ -10,6 +11,7 @@ export const PlanOutput = z.object({
   summary: z.string(),
   plan_markdown: z.string().min(1),
   open_questions: z.array(z.string()),
+  branch_name: z.string(),
 });
 
 export const DecomposeOutput = z.object({
@@ -20,6 +22,7 @@ export const DeveloperOutput = z.object({
   status: z.enum(["done", "blocked"]),
   summary: z.string(),
   blocked_reason: z.string(),
+  commit_message: z.string(),
 });
 
 export const ReviewOutput = z.object({
@@ -77,13 +80,24 @@ function base<T>(
   };
 }
 
+function listBlock(title: string, items: string[]): string {
+  return `## ${title}\n\n${items.length ? items.map((i) => `- ${i}`).join("\n") : "(none)"}`;
+}
+
 export function leadPlanRequest(ctx: Ctx, config: Config, request: string, logFile: string): AgentRequest<PlanOutput> {
+  // Konvensi repo diberikan langsung supaya Lead tidak perlu izin git untuk
+  // melihatnya.
+  const sections = [
+    `## Request\n\n${request}`,
+    listBlock("Existing branches (newest first)", branchNames(ctx.root, 30)),
+    listBlock("Recent commit subjects", recentSubjects(ctx.root, 15)),
+  ];
   return {
     ...base(ctx, config, "lead", logFile, PlanOutput),
     systemPrompt: template("lead-plan", config),
     tools: [...READ_TOOLS, "Bash"],
     allowedTools: [],
-    prompt: `## Request\n\n${request}\n`,
+    prompt: sections.join("\n\n"),
   };
 }
 
@@ -128,6 +142,7 @@ export function developerRequest(
     `## Overall request\n\n${manifest.request}`,
     `## Approved plan\n\n${plan}`,
     `## Completed tasks\n\n${completedBlock(manifest)}`,
+    listBlock("Recent commit subjects in this repository (follow their style)", recentSubjects(ctx.root, 15)),
     taskBlock(task),
   ];
   if (feedback) {

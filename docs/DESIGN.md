@@ -65,7 +65,7 @@ bondowoso reset <task-id>       # ulang tugas dari awal
           │               [Reviewer agent] ─changes────┘
           │                        │ approve
           │                        ▼
-          │               git commit "T3: <judul>"
+          │               git commit "<pesan dari Developer>"
           │               status = done
           │
           └─ status "blocked" dari agent / attempt habis
@@ -110,9 +110,6 @@ roles:                       # model diteruskan apa adanya ke `claude --model`
 limits:
   max_attempts: 3            # developer→gate/review loop per tugas
   gate_output_tail: 150      # baris terakhir output gate yang dikirim ke developer
-git:
-  branch_prefix: bondowoso/
-  commit_per_task: true
 ```
 
 `bondowoso init` mengisi `gates` secara otomatis dari `package.json` /
@@ -234,8 +231,16 @@ Catatan penting (sudah dicek di mesin ini, Claude Code 2.1.281):
   dicatat, dan saat rollback hanya file untracked **baru** yang dihapus.
 - Orkestrator **tidak pernah push**. Ini penting untuk digiboost, karena push ke
   `main` langsung memicu deploy produksi.
-- Pertama kali jalan: buat branch `bondowoso/<slug-permintaan>` dari HEAD.
-- Satu commit per tugas yang lolos, pesan `T3: <judul tugas>`.
+- Hasil tidak membawa jejak orkestrator. Nama branch diusulkan Lead dari konvensi
+  branch repo (daftar branch + subject commit terbaru diberikan di prompt), ditulis di
+  baris `**Branch:**` plan.md dan boleh diedit sebelum approve. Nama yang tidak valid
+  (`git check-ref-format`) atau menyebut orkestrator diganti cadangan `feat/<5 kata awal>`;
+  bentrok nama diberi akhiran `-2`, `-3`, ...
+- Pertama kali jalan: buat branch itu dari HEAD.
+- Satu commit per tugas yang lolos. Pesannya diusulkan Developer mengikuti gaya commit
+  repo; id tugas di depan subject dan trailer (`Co-Authored-By`, "Generated with …")
+  dibuang. Untuk mengenali commit yang sempat dibuat sebelum proses terputus, HEAD
+  sebelum commit dicatat di manifest (`commit_base`), bukan ditandai di pesan commit.
 - Tugas yang gagal/blocked/terputus: diff-nya (termasuk file baru dan hasil
   `git rm`/`git mv`) disimpan sebagai patch `runs/<run>/<id>-attempt-<n>.patch`,
   lalu working tree dikembalikan ke commit terakhir. `bondowoso resume <id>`
