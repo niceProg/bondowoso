@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { rmSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { STATE_DIR } from "./config.ts";
 
 interface GitResult {
@@ -65,8 +65,8 @@ export function branchExists(root: string, name: string): boolean {
   return run(root, ["rev-parse", "--verify", "--quiet", `refs/heads/${name}`]).code === 0;
 }
 
-export function switchBranch(root: string, name: string, create: boolean): void {
-  git(root, create ? ["switch", "-q", "-c", name] : ["switch", "-q", name]);
+export function switchBranch(root: string, name: string, create: boolean, startPoint?: string): void {
+  git(root, create ? ["switch", "-q", "-c", name, ...(startPoint ? [startPoint] : [])] : ["switch", "-q", name]);
 }
 
 export function newFiles(root: string, untrackedBefore: string[]): string[] {
@@ -130,4 +130,99 @@ export function branchNames(root: string, count: number): string[] {
 
 export function isValidBranchName(root: string, name: string): boolean {
   return run(root, ["check-ref-format", "--branch", name]).code === 0;
+}
+
+// Semua path yang berubah dibanding HEAD selama tugas: tracked (termasuk yang
+// dihapus/dipindah) plus berkas baru.
+export function changedFiles(root: string, untrackedBefore: string[]): string[] {
+  const state = workingState(root);
+  return [...new Set([...state.tracked, ...newFiles(root, untrackedBefore)])].sort();
+}
+
+// Isi berkas yang sedang berubah; null berarti berkas tidak ada di disk.
+export type Snapshot = Map<string, Buffer | null>;
+
+export function snapshot(root: string, untrackedBefore: string[]): Snapshot {
+  const snap: Snapshot = new Map();
+  for (const f of changedFiles(root, untrackedBefore)) {
+    const abs = join(root, f);
+    snap.set(f, existsSync(abs) ? readFileSync(abs) : null);
+  }
+  return snap;
+}
+
+function isInHead(root: string, path: string): boolean {
+  return run(root, ["cat-file", "-e", `HEAD:${path}`]).code === 0;
+}
+
+function restorePath(root: string, path: string, content: Buffer | null | undefined): void {
+  const abs = join(root, path);
+  run(root, ["reset", "-q", "--", path]);
+  if (content === undefined) {
+    // Sebelumnya tidak berubah: kembalikan ke HEAD, atau hapus kalau berkas baru.
+    if (isInHead(root, path)) git(root, ["checkout", "-q", "HEAD", "--", path]);
+    else rmSync(abs, { force: true });
+  } else if (content === null) {
+    rmSync(abs, { force: true });
+  } else {
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, content);
+  }
+}
+
+// Kembalikan ke kondisi snapshot setiap berkas yang diubah sejak snapshot
+// diambil dan tidak lolos `allowed`. Mengembalikan daftar path yang dipulihkan.
+export function restoreOutside(root: string, snap: Snapshot, untrackedBefore: string[], allowed: (path: string) => boolean): string[] {
+  const restored: string[] = [];
+  const candidates = new Set([...changedFiles(root, untrackedBefore), ...snap.keys()]);
+  // Kandidat di luar snapshot pasti sedang berubah, jadi `before === undefined`
+  // berarti "kembalikan ke HEAD".
+  for (const f of candidates) {
+    if (allowed(f)) continue;
+    const abs = join(root, f);
+    const now = existsSync(abs) ? readFileSync(abs) : null;
+    const before = snap.has(f) ? snap.get(f)! : undefined;
+    const same = before === undefined ? false : before === null ? now === null : now !== null && before.equals(now);
+    if (same) continue;
+    restorePath(root, f, before);
+    restored.push(f);
+  }
+  return restored.sort();
+}
+
+// Diff sebuah commit lama digabung dengan perubahan working tree di berkas
+// yang sama; dipakai fase susulan (`work --full`) untuk tugas yang sudah commit.
+export function commitFilesDiff(root: string, commit: string): { files: string[]; diff: string } {
+  const files = git(root, ["diff-tree", "--no-commit-id", "--name-only", "-r", commit]).split("\n").filter(Boolean);
+  const diff = files.length ? run(root, ["diff", `${commit}^`, "--", ...files]).stdout : "";
+  return { files, diff };
+}
+
+// ---------------------------------------------------------------- worktree
+
+export function addWorktree(root: string, path: string, rev: string): void {
+  run(root, ["worktree", "prune"]);
+  if (existsSync(path)) {
+    run(root, ["worktree", "remove", "--force", path]);
+    rmSync(path, { recursive: true, force: true });
+  }
+  mkdirSync(dirname(path), { recursive: true });
+  git(root, ["worktree", "add", "--detach", "-q", path, rev]);
+}
+
+export function removeWorktree(root: string, path: string): void {
+  run(root, ["worktree", "remove", "--force", path]);
+  rmSync(path, { recursive: true, force: true });
+  run(root, ["worktree", "prune"]);
+}
+
+// Pasang commit dari worktree ke branch kerja. Bentrok → batalkan, kembalikan false.
+export function cherryPick(root: string, sha: string): boolean {
+  if (run(root, ["cherry-pick", sha]).code === 0) return true;
+  run(root, ["cherry-pick", "--abort"]);
+  return false;
+}
+
+export function commitPatch(root: string, sha: string): string {
+  return git(root, ["format-patch", "--stdout", "--binary", "-1", sha]);
 }

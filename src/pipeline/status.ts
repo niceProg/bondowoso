@@ -17,11 +17,19 @@ export function status(ctx: Ctx): void {
   const m = loadManifest(ctx);
   console.log(`Run      ${m.run_id}`);
   console.log(`Request  ${m.request}`);
-  console.log(`Branch   ${m.branch ?? "(belum dibuat)"}`);
-  console.log(`Approve  ${m.plan_hash ? "ya" : "belum"}\n`);
+  console.log(`Branch   ${m.branch ?? `(belum dibuat; usulan ${m.branch_name ?? "-"}${m.base_ref ? ` dari ${m.base_ref}` : ""})`}`);
+  console.log(`Scope    ${m.scope ?? "-"}`);
+  console.log(`Approve  ${m.plan_hash ? "ya" : "belum"}${m.pending_append ? " (ada tambahan yang belum di-approve)" : ""}\n`);
   for (const t of m.tasks) {
     const state = styleText(COLOR[t.status], t.status.padEnd(11));
-    const extra = t.commit ? ` ${styleText("dim", t.commit)}` : "";
+    const tags = [
+      t.commit,
+      t.followup_commit ? `+${t.followup_commit}` : "",
+      t.deferred?.length ? `ditunda: ${t.deferred.join(",")}` : "",
+      t.test_plan ? `${t.test_plan.cases.length} tc` : "",
+      t.skills?.length ? t.skills.join(",") : "",
+    ].filter(Boolean);
+    const extra = tags.length ? ` ${styleText("dim", tags.join(" · "))}` : "";
     console.log(`${t.id.padEnd(4)} ${state} ${String(t.attempts).padStart(1)}x  ${t.title}${extra}`);
     if (t.status !== "blocked") continue;
     const indent = (text: string) => styleText("dim", `     ${text.split("\n").join("\n     ")}`);

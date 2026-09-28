@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { z } from "zod";
+import type { HookConfig } from "../hooks/hook.ts";
 
 // Kalau salah satu variabel ini ada, Claude Code akan menagih API alih-alih
 // memakai login langganan Max. Selalu dibuang dari env subprocess.
@@ -37,6 +39,9 @@ export interface AgentRequest<T> {
   cwd: string;
   logFile: string;
   timeoutMs: number;
+  // Hook deterministik (berkas sensitif, perintah rahasia, compaction gate,
+  // kunci berkas). Tanpa ini agent hanya dibatasi allowlist permission.
+  hooks?: HookConfig;
 }
 
 export interface AgentResponse<T> {
@@ -61,9 +66,12 @@ export function buildArgs(req: AgentRequest<unknown>): string[] {
     "--permission-prompts", "none",
     "--model", req.model,
     "--effort", req.effort,
-    "--no-session-persistence",
     "--strict-mcp-config",
   ];
+  if (req.hooks) args.push("--settings", hookSettingsFile());
+  // Compaction gate membaca transcript sesi, jadi sesi harus disimpan; transcript
+  // dihapus lagi setelah agent selesai (lihat removeTranscript).
+  if (!req.hooks?.compaction) args.push("--no-session-persistence");
   // Opsi variadic: harus paling akhir supaya tidak menelan opsi lain.
   if (req.allowedTools.length > 0) args.push("--allowedTools", ...req.allowedTools);
   return args;
@@ -72,6 +80,7 @@ export function buildArgs(req: AgentRequest<unknown>): string[] {
 export async function runAgent<T>(req: AgentRequest<T>): Promise<AgentResponse<T>> {
   const env: NodeJS.ProcessEnv = { ...process.env, BONDOWOSO_ROLE: req.role };
   for (const key of SCRUBBED_ENV) delete env[key];
+  if (req.hooks) env.BONDOWOSO_HOOK_CONFIG = JSON.stringify(req.hooks);
 
   const { code, stdout, stderr, timedOut } = await new Promise<{
     code: number | null;
@@ -115,6 +124,8 @@ export async function runAgent<T>(req: AgentRequest<T>): Promise<AgentResponse<T
     throw new AgentError(`${req.role}: claude keluar dengan kode ${code}, output bukan JSON:\n${text.trim().slice(-2000)}`);
   }
 
+  if (req.hooks?.compaction && typeof data.session_id === "string") removeTranscript(data.session_id);
+
   if (data.is_error) {
     const message = String(data.result ?? data.subtype ?? "error tanpa pesan");
     if (data.api_error_status === 429 || RATE_LIMIT_RE.test(message)) {
@@ -149,4 +160,32 @@ export function parseResetTime(message: string, now = new Date()): Date | undefi
   at.setHours(hour, minute, 0, 0);
   if (at <= now) at.setDate(at.getDate() + 1);
   return at;
+}
+
+const HOOK_SCRIPT = join(import.meta.dirname, "..", "hooks", "hook.ts");
+
+// settings.json yang memasang dispatcher hook untuk semua tool yang bisa
+// menyentuh berkas atau shell. Isinya statis; konfigurasi per agent lewat env.
+export function hookSettingsFile(): string {
+  const file = join(tmpdir(), "bondowoso-hooks-settings.json");
+  const command = `"${process.execPath}" "${HOOK_SCRIPT}"`;
+  const settings = {
+    hooks: {
+      PreToolUse: [
+        { matcher: "Read|Edit|MultiEdit|Write|NotebookEdit|Grep|Glob|Bash", hooks: [{ type: "command", command, timeout: 30 }] },
+      ],
+    },
+  };
+  writeFileSync(file, JSON.stringify(settings, null, 2));
+  return file;
+}
+
+// Hapus transcript sesi agent dari ~/.claude/projects setelah dipakai compaction
+// gate, supaya riwayat sesi tidak menumpuk dan tidak muncul di `claude --resume`.
+export function removeTranscript(sessionId: string, projectsDir = join(homedir(), ".claude", "projects")): void {
+  if (!/^[0-9a-f-]{36}$/.test(sessionId) || !existsSync(projectsDir)) return;
+  for (const dir of readdirSync(projectsDir)) {
+    const file = join(projectsDir, dir, `${sessionId}.jsonl`);
+    if (existsSync(file)) rmSync(file, { force: true });
+  }
 }

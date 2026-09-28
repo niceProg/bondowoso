@@ -13,7 +13,7 @@ export const TaskSpecSchema = z.object({
 });
 
 const HistoryEntry = z.object({
-  step: z.enum(["developer", "gates", "reviewer", "commit", "rollback", "rate_limit", "resume"]),
+  step: z.enum(["developer", "gates", "secrets", "simplifier", "tester", "reviewer", "commit", "rollback", "rate_limit", "resume"]),
   attempt: z.number().int(),
   result: z.string(),
   at: z.string(),
@@ -38,6 +38,38 @@ const TaskSchema = TaskSpecSchema.extend({
   // HEAD tepat sebelum commit tugas ini, untuk mengenali commit yang sempat
   // dibuat sebelum proses terputus tanpa menandai pesan commit.
   commit_base: z.string().optional(),
+  // Skill yang ditetapkan Lead saat dekomposisi.
+  skills: z.array(z.string()).optional(),
+  // Rencana test dari Test Lead (fase test-planning).
+  test_plan: z
+    .object({
+      test_files: z.array(z.string()),
+      cases: z.array(
+        z.object({
+          id: z.string(),
+          title: z.string(),
+          type: z.enum(["unit", "integration", "e2e"]),
+          input: z.string(),
+          expected: z.string(),
+          mocks: z.array(z.string()),
+        }),
+      ),
+      notes: z.string(),
+    })
+    .optional(),
+  // State dirty-bit per domain selama tugas dikerjakan.
+  feedback_loop: z
+    .object({
+      domains: z.record(z.string(), z.object({ review: z.enum(["PENDING", "PASS", "FAIL"]), testing: z.enum(["PENDING", "PASS", "FAIL"]) })),
+      outputs: z.array(z.string()),
+    })
+    .optional(),
+  // Fase yang ditunda oleh `work --compact`, dijalankan nanti oleh `work --full`.
+  deferred: z.array(z.enum(["simplify", "test", "review"])).optional(),
+  // Commit susulan dari fase yang ditunda.
+  followup_commit: z.string().optional(),
+  // Worktree tempat tugas sedang dikerjakan di mode paralel.
+  worktree: z.string().optional(),
   history: z.array(HistoryEntry),
 });
 
@@ -51,6 +83,12 @@ const ManifestSchema = z.object({
   base_commit: z.string().optional(),
   plan_hash: z.string().optional(),
   baseline_ok: z.boolean().optional(),
+  // Branch dasar untuk memotong branch kerja (`plan --base`).
+  base_ref: z.string().optional(),
+  // Rencana tambahan (`plan --append`) yang belum dipecah jadi tugas.
+  pending_append: z.object({ request: z.string(), marker: z.string() }).optional(),
+  // Memory run sudah di-compact/promote.
+  memory_done: z.boolean().optional(),
   tasks: z.array(TaskSchema),
 });
 

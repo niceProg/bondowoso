@@ -1,8 +1,16 @@
 # Bondowoso
 
-Orkestrator AI coding agent berbasis Claude Code. Satu permintaan dipecah jadi
-tugas-tugas kecil; tiap tugas dikerjakan Developer yang selalu fresh, lalu harus
-lolos gate (lint/test/build) dan Reviewer sebelum di-commit ke branch terpisah.
+Orkestrator AI coding agent berbasis Claude Code, mengikuti desain
+[Jonggrang](https://jonggrang.dev). Satu permintaan dipecah jadi tugas-tugas kecil;
+setiap tugas dikerjakan agent yang selalu fresh dan harus melewati pipeline:
+
+```
+Implement → gate → scan secret → Simplify → Test → Review → commit
+```
+
+Commit baru terjadi kalau setiap domain yang disentuh (frontend, api, database, …)
+lolos Test **dan** Review (dirty-bit per domain). Hasilnya satu commit per tugas di
+branch terpisah, dengan nama branch dan pesan commit yang mengikuti konvensi repo.
 
 Memakai CLI `claude` resmi dengan login langganan (Max), bukan API key.
 `ANTHROPIC_API_KEY` selalu dibuang dari env agent supaya tidak menagih API.
@@ -26,50 +34,89 @@ Jalankan dari dalam repo yang mau dikerjakan:
 ```bash
 cd <repo>
 bondowoso init                  # buat .bondowoso/config.yaml, rapikan gate-nya
-bondowoso plan "<permintaan>"   # Lead menulis .bondowoso/plan.md
-# baca & edit .bondowoso/plan.md
-bondowoso approve               # pecah rencana menjadi tugas
-bondowoso work                  # --wait: tunggu sendiri saat kuota habis
+bondowoso plan "<permintaan>"   # Lead bertanya bila perlu, lalu menulis .bondowoso/plan.md
+bondowoso approve               # pecah jadi tugas; Test Lead merancang kasus test
+bondowoso work                  # kerjakan semua tugas
 bondowoso status
 ```
 
+Sekali jalan tanpa berhenti: `bondowoso work "<permintaan>" --yes`.
 Dari luar repo, pakai `-C`: `bondowoso -C <repo> status`.
 
-Tiga cara menulis permintaan untuk `plan`:
+### Perencanaan
 
 ```bash
-bondowoso plan "Tambah filter tanggal di daftar event"   # satu baris
-bondowoso plan                                          # buka $EDITOR (mis. nvim)
-bondowoso plan --file permintaan.md                     # dari file Markdown
+bondowoso plan "Tambah filter tanggal"        # satu baris
+bondowoso plan                                # tulis di $EDITOR
+bondowoso plan --file permintaan.md           # dari file Markdown
+bondowoso plan --deep "…"                     # discovery → analisis 2–3 pendekatan → rencana
+bondowoso plan --src docs/brd.md "…"          # dokumen kebutuhan sebagai referensi
+bondowoso plan --base develop "…"             # potong branch kerja dari develop
+bondowoso plan --no-ask "…"                   # lewati pertanyaan klarifikasi
+bondowoso plan --yes "…"                      # tanpa pertanyaan, langsung approve
+bondowoso plan --revise "persingkat fase 2"   # revisi plan.md yang belum di-approve
+bondowoso plan --append "tambah ekspor CSV"   # tambah ke rencana yang sudah jalan
 ```
 
-Di editor dan file, blok `<!-- komentar -->` diabaikan. Draf dari editor disimpan
-di `.bondowoso/request.md`; kalau plan gagal, draf itu dibuka lagi pada
-`bondowoso plan` berikutnya.
+Nama branch diusulkan Lead dari konvensi repo dan bisa diubah di baris
+**Branch:** `plan.md` sebelum approve. Di editor dan file, blok `<!-- komentar -->`
+diabaikan.
 
-## Kalau tugas macet (blocked)
-
-Perubahan tugas yang blocked, error, atau terputus tidak pernah dibuang begitu
-saja: sebelum working tree dibersihkan, diff-nya disimpan sebagai patch di
-`.bondowoso/runs/<run>/`. `bondowoso status` menampilkan alasannya, aksi yang
-ditolak permission, dan saran pola `developer_bash`.
+### Mengerjakan
 
 ```bash
-bondowoso resume T1   # pasang lagi hasil terakhir T1 ke working tree
-# tambal manual bagian yang tidak bisa dikerjakan agent (atau tambah izin di config.yaml)
-bondowoso work        # gate → Reviewer → commit; Developer lanjut dari situ bila perlu
-
-bondowoso reset T1    # atau: buang dan ulang T1 dari awal
+bondowoso work                  # berurutan
+bondowoso work --parallel 3     # sampai 3 tugas bersamaan, masing-masing di worktree
+bondowoso work --task T3        # hanya T3 (plus dependensinya yang belum selesai)
+bondowoso work --compact        # implement + gate saja; simplify/test/review ditunda
+bondowoso work --full           # jalankan fase yang ditunda, jadi commit susulan
+bondowoso work --wait           # saat kuota Max habis, tunggu lalu lanjut sendiri
 ```
 
-Kode keluar `work`: `0` semua selesai, `2` ada tugas blocked, `75` kuota Max habis
-(jalankan `work` lagi nanti untuk melanjutkan), `1` error lain.
+Kode keluar `work`: `0` selesai, `2` ada tugas blocked, `75` kuota Max habis
+(jalankan lagi nanti), `1` error lain.
 
-Orkestrator tidak pernah push dan tidak pernah merge. Hasilnya tidak membawa jejak
-orkestrator: nama branch diusulkan Lead mengikuti konvensi repo (mis.
-`feat/redesign-dashboard-user`, bisa diubah di baris **Branch:** `plan.md` sebelum
-approve), dan pesan commit ditulis Developer mengikuti gaya commit repo, tanpa id tugas
-dan tanpa trailer AI. Review, push, dan merge dilakukan manusia.
+### Kalau tugas macet (blocked)
+
+Perubahan tugas yang blocked, error, atau terputus tidak pernah dibuang begitu saja:
+diff-nya disimpan sebagai patch di `.bondowoso/runs/<run>/`. `bondowoso status`
+menampilkan alasannya, aksi yang ditolak, dan saran pola `developer_bash`.
+
+```bash
+bondowoso resume T1   # pasang lagi hasil terakhir T1, tambal manual bila perlu
+bondowoso work        # gate → test → review → commit; Developer lanjut dari situ bila perlu
+bondowoso reset T1    # atau: ulang T1 dari awal
+```
+
+### Skill dan memory
+
+```bash
+bondowoso skills list           # skill bawaan + .bondowoso/skills/**/SKILL.md
+bondowoso skills show go-idioms
+bondowoso memory show           # .bondowoso/MEMORY.md (pelajaran proyek)
+bondowoso memory recall "auth"  # potongan memory yang relevan
+bondowoso memory compact        # rangkum fragmen tugas run aktif
+bondowoso memory promote        # promosikan pelajaran stabil ke MEMORY.md
+```
+
+Skill dipilih per tugas (penugasan Lead + kata kunci + domain berkas) dan
+disisipkan ke prompt Developer, Tester, dan Reviewer. Setelah run selesai, catatan
+per tugas dirangkum lalu pelajaran yang stabil dipromosikan ke `MEMORY.md`, yang
+dibaca Lead dan Developer di run berikutnya. `MEMORY.md` dan `.bondowoso/skills/`
+boleh di-commit.
+
+## Pengaman
+
+- Peran dibatasi lewat daftar tool, bukan prompt: Lead, Test Lead, dan Reviewer hanya
+  membaca; perubahan Tester di luar berkas test dan perubahan Simplifier di luar
+  berkas tugas dikembalikan otomatis.
+- Hook Claude Code (`src/hooks/`) memblokir baca/tulis berkas rahasia (`.env`, kunci,
+  kredensial), perintah yang membocorkan secret atau `git push`, pemakaian konteks di
+  atas 85% (compaction gate), dan penulisan berkas yang sedang dipegang tugas paralel
+  lain (first-writer-wins).
+- Diff diperiksa pola secret sebelum setiap commit.
+- Orkestrator tidak pernah push dan tidak pernah merge; review, push, dan merge
+  dilakukan manusia.
 
 ## Pengembangan
 

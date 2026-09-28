@@ -1,317 +1,203 @@
-# Bondowoso — Desain Arsitektur MVP
+# Bondowoso — Desain
 
 > Orkestrator AI coding agent berbasis Claude Code (akun Max, tanpa API key).
-> Nama dari Bandung Bondowoso: yang menyuruh ribuan pekerja membangun candi
-> dalam semalam. Terinspirasi dari [Jonggrang](https://github.com/porcupine-md/jonggrang).
+> Nama dari Bandung Bondowoso, yang menyuruh ribuan pekerja membangun candi dalam
+> semalam. Desainnya mengikuti dokumentasi [Jonggrang](https://github.com/porcupine-md/jonggrang).
 
-Status: **DISETUJUI 2026-09-25**, uji coba pertama di `~/Working/digiboost`.
-
----
-
-## 1. Tujuan
-
-- Memecah satu permintaan fitur menjadi tugas-tugas kecil, lalu mengerjakannya
-  satu per satu dengan agent yang **selalu fresh** (konteks bersih).
-- Setiap tugas wajib lolos **gerbang deterministik** (lint/typecheck/test)
-  dan **review agent** sebelum dianggap selesai.
-- Semua state tersimpan di file, sehingga proses bisa dihentikan kapan saja
-  (Ctrl+C, rate limit, laptop sleep) lalu dilanjutkan dengan `bondowoso work`.
-- Tenaga kerjanya adalah CLI `claude` resmi, sehingga kuota yang dipakai
-  adalah **langganan Max**.
-
-### Bukan tujuan MVP
-- Multi-backend (Codex, OpenCode). Hanya Claude Code.
-- Agent paralel. Tugas dijalankan berurutan; paralel via git worktree masuk fase 2.
-- UI web. Cukup CLI.
+Status: **v2 (2026-09-29)**. v1 (MVP) disetujui 2026-09-25 dan diuji di digiboost.
 
 ---
 
-## 2. Prinsip
+## 1. Prinsip
 
-1. **Stateless agent, stateful orchestrator.** Agent tidak mengingat apa pun;
-   semua yang perlu diketahui dimasukkan ke prompt-nya.
-2. **Kode yang memutuskan, bukan LLM.** Lulus/gagal gate, urutan tugas, retry,
-   dan commit ditentukan oleh TypeScript, bukan oleh agent.
-3. **Output agent terstruktur.** Setiap agent wajib membalas JSON sesuai
-   schema (`--json-schema`), sehingga orkestrator tidak menebak-nebak dari teks bebas.
-4. **Batas peran ditegakkan oleh tool, bukan oleh prompt.** Reviewer tidak
-   diberi tool `Edit`/`Write` sama sekali, bukan sekadar "dilarang mengedit".
-5. **Manusia menyetujui rencana.** Tidak ada kode yang ditulis sebelum
-   `plan.md` di-approve.
+1. **Stateless agent, stateful orchestrator.** Setiap agent adalah proses `claude -p`
+   baru dengan konteks bersih; semua state ada di `.bondowoso/manifest.yaml`.
+2. **Kode yang memutuskan, bukan LLM.** Lulus/gagal gate, dirty-bit, retry, pemulihan
+   berkas di luar wewenang, commit, dan penggabungan ditentukan TypeScript.
+3. **Output agent terstruktur.** Setiap peran membalas JSON sesuai schema (`--json-schema`).
+4. **Batas peran ditegakkan oleh tool dan orkestrator, bukan prompt.**
+5. **Manusia menyetujui rencana** dan memegang push/merge.
+
+Riset atas kode Jonggrang (September 2026) menemukan banyak bagian dokumentasinya
+belum benar-benar ditegakkan di kode: batas peran hanya lewat prompt, verdict
+Reviewer tidak dibaca, loop dirty-bit tidak pernah aktif, router skill tidak
+dipanggil. Bondowoso mengikuti **desain yang didokumentasikan**, tetapi
+menegakkannya secara deterministik.
 
 ---
 
-## 3. Alur perintah
+## 2. Perintah
 
 ```
-bondowoso init                  # sekali per repo: buat .bondowoso/config.yaml
-bondowoso plan "<permintaan>"   # Lead menjelajah repo → .bondowoso/plan.md
-   (manusia membaca & boleh mengedit plan.md)
-bondowoso approve               # Lead memecah plan.md → tasks di manifest.yaml
-bondowoso work                  # jalankan tugas pending sampai habis / terhenti
-bondowoso status                # tabel tugas + status + attempt
-bondowoso resume <task-id>      # pasang lagi patch terakhir tugas blocked, lanjutkan
-bondowoso reset <task-id>       # ulang tugas dari awal
-```
-
-### Alur per tugas di `bondowoso work`
-
-```
-          ┌────────────────────────────────────────────┐
-          ▼                                            │ feedback
-   [Developer agent] ──► [Gates: lint/type/test] ──fail┤ (attempt < 3)
-          │                        │ pass              │
-          │                        ▼                   │
-          │               [Reviewer agent] ─changes────┘
-          │                        │ approve
-          │                        ▼
-          │               git commit "<pesan dari Developer>"
-          │               status = done
-          │
-          └─ status "blocked" dari agent / attempt habis
-                 → status = blocked, lanjut ke tugas berikut
-                   yang tidak bergantung padanya
+bondowoso init
+bondowoso plan [permintaan] [--file f] [--deep] [--src f] [--base b] [--no-ask] [--yes]
+bondowoso plan --revise "<instruksi>"      # plan belum di-approve
+bondowoso plan --append "<permintaan>"     # tambah ke run yang sudah di-approve
+bondowoso approve [--force]
+bondowoso work [--parallel n] [--task T3] [--compact] [--full] [--wait]
+bondowoso work "<permintaan>" --yes        # plan + approve + work sekaligus
+bondowoso status | resume <id> | reset <id>
+bondowoso memory show|recall|compact|promote
+bondowoso skills list|show
 ```
 
 ---
 
-## 4. Struktur di repo target
+## 3. Fase
 
-```
-<repo>/
-└── .bondowoso/
-    ├── config.yaml          # di-commit: gates, model per peran, batas attempt
-    ├── plan.md              # hasil `plan`, diedit manusia
-    ├── manifest.yaml        # state tugas (sumber kebenaran)
-    └── runs/                # di-.gitignore: log mentah tiap panggilan agent
-        └── 2026-09-24T10-00-00/
-            ├── T1-developer-1.json
-            ├── T1-gates-1.log
-            └── T1-reviewer-1.json
-```
-
-### `config.yaml`
-
-```yaml
-gates:                       # dijalankan berurutan oleh orkestrator
-  - name: api-vet
-    cwd: api                 # relatif ke root repo; default "."
-    run: go vet ./...
-  - name: api-test
-    cwd: api
-    run: go test ./...
-  - name: web-typecheck
-    cwd: web
-    run: npm run typecheck
-roles:                       # model diteruskan apa adanya ke `claude --model`
-  lead:      { model: claude-opus-5,   effort: high }
-  developer: { model: claude-sonnet-5, effort: xhigh }
-  reviewer:  { model: claude-opus-5,   effort: medium }
-limits:
-  max_attempts: 3            # developer→gate/review loop per tugas
-  gate_output_tail: 150      # baris terakhir output gate yang dikirim ke developer
-```
-
-`bondowoso init` mengisi `gates` secara otomatis dari `package.json` /
-`composer.json` bila ada, lalu manusia merapikannya.
-
-### `manifest.yaml`
-
-```yaml
-run_id: 2026-09-24T10-00-00
-request: "Tambah filter tanggal di halaman daftar Event"
-branch: bondowoso/event-date-filter
-plan_hash: 3f9a…            # approve ditolak kalau plan.md berubah setelahnya
-tasks:
-  - id: T1
-    title: Tambah query var `event_from`/`event_to`
-    description: |
-      …
-    acceptance:
-      - "GET /events?event_from=2026-10-01 hanya menampilkan event ≥ tanggal itu"
-    files_hint: [inc/query.php]
-    depends_on: []
-    status: done              # pending | in_progress | done | blocked
-    attempts: 1
-    commit: a1b2c3d
-    history:
-      - { step: developer, attempt: 1, result: done }
-      - { step: gates, attempt: 1, result: pass }
-      - { step: reviewer, attempt: 1, result: approve }
-  - id: T2
-    depends_on: [T1]
-    status: pending
-    …
-```
-
-Manifest ditulis **atomik** (tulis ke file sementara lalu `rename`) setelah
-setiap langkah, sehingga crash di tengah jalan tidak merusak state.
-
----
-
-## 5. Peran
-
-| Peran | Kapan | Tool yang diberikan (`--tools`) | Output (JSON schema) |
+| # | Fase | Peran | Kapan |
 |---|---|---|---|
-| **Lead** (plan) | `bondowoso plan` | `Read, Grep, Glob, Bash(git log:*), Bash(ls:*)` | `{ scope, summary, plan_markdown, open_questions[] }` |
-| **Lead** (decompose) | `bondowoso approve` | `Read, Grep, Glob` | `{ tasks: [{ id, title, description, acceptance[], files_hint[], depends_on[] }] }` |
-| **Developer** | tiap tugas | `Read, Grep, Glob, Edit, Write, Bash(<developer_bash>)` | `{ status: done\|blocked, summary, blocked_reason? }` |
-| **Reviewer** | setelah gate lulus | `Read, Grep, Glob` (diff diberikan di prompt) | `{ verdict: approve\|request_changes, issues: [{ file, line, severity, message }] }` |
+| 1 | Klarifikasi | Lead | `plan` di terminal interaktif, kecuali `--no-ask`/`--yes`; ≤ 6 pertanyaan pilihan/teks |
+| 2 | Discovery | Lead | `plan --deep` |
+| 3 | Analisis (2–3 pendekatan + rekomendasi + triage scope) | Lead | `plan --deep` |
+| 4 | Rencana (`plan.md`, usulan branch) | Lead | selalu |
+| 5 | Dekomposisi (tugas atomik + skill per tugas) | Lead | `approve` |
+| 6 | Test planning (kasus test per tugas) | Test Lead | `approve`, kecuali scope bugfix |
+| 7 | Implement | Developer | per tugas |
+| 8 | Gate (lint/test/build dari config) | orkestrator | per tugas |
+| 9 | Scan secret pada baris diff yang ditambahkan | orkestrator | per tugas |
+| 10 | Simplify (tanpa ubah perilaku; hanya berkas tugas) | Simplifier | kecuali scope bugfix |
+| 11 | Test (tulis/jalankan test; hanya berkas test) | Tester | per tugas |
+| 12 | Review (design verification, domain compliance, code quality, test quality) | Reviewer | per tugas |
+| 13 | Commit + fragmen memory | orkestrator | per tugas |
+| 14 | Memory compact → promote | Lead (tanpa tool) | akhir run |
 
-Penegakan batas peran:
-- Semua agent jalan dengan `--permission-mode dontAsk`: tool atau perintah Bash
-  yang tidak ada di allowlist langsung ditolak (sudah diuji: `touch` dan `Write`
-  ditolak, perintah read-only seperti `date` lolos).
-- Reviewer hanya diberi `Read, Grep, Glob`, jadi secara fisik tidak bisa menulis.
-- Developer hanya boleh menjalankan pola Bash di `developer_bash` (mis. `go test:*`),
-  jadi tidak bisa `git commit`/`git push`; hanya orkestrator yang melakukan commit.
-- Jumlah aksi yang ditolak dicatat di history tugas untuk menyetel `developer_bash`.
+Fase yang dilewati per scope diatur `pipeline.skip` (bawaan: bugfix melewati
+simplify dan test planning, seperti `PHASE_SKIP_MAP` Jonggrang). `work --compact`
+berhenti setelah fase 9 dan mencatat `deferred`; `work --full` menjalankan fase
+10–12 untuk tugas itu sebagai commit susulan.
 
-**Tester** (menulis test dari acceptance criteria sebelum Developer mulai)
-ditunda ke fase 2, karena gate `test` sudah menjadi jaring pengaman pertama.
+Berbeda dari Jonggrang (Simplify/Test/Review sekali di level fitur setelah semua
+tugas), Bondowoso menjalankannya **per tugas**, sehingga setiap commit sudah teruji
+dan direview.
 
-### Isi prompt per panggilan (konteks minimal)
-- Prompt peran (`src/prompts/<role>.md`), dilampirkan via `--append-system-prompt`.
-- Ringkasan permintaan + bagian `plan.md` yang relevan.
-- Spesifikasi tugas (deskripsi, acceptance, files_hint).
-- Ringkasan tugas yang sudah selesai (judul + commit), **bukan** isi percakapannya.
-- Pada retry: output gate yang gagal (tail N baris) atau daftar issue dari Reviewer.
+### Peran dan tool
 
----
+| Peran | Tool | Catatan |
+|---|---|---|
+| Lead, Test Lead | `Read, Grep, Glob, Bash` (hanya read-only yang lolos `dontAsk`) | |
+| Developer | `Read, Grep, Glob, Edit, Write, Bash(developer_bash)` | boleh `git rm`/`git mv`, tidak boleh commit/push |
+| Simplifier | sama dengan Developer | perubahan di luar berkas tugas dikembalikan; gate merah → Simplify dibatalkan |
+| Tester | sama dengan Developer | perubahan di luar berkas test (domain `testing`) dikembalikan; bug dilaporkan, tidak diperbaiki |
+| Reviewer | `Read, Grep, Glob` | secara fisik tidak bisa menulis |
+| Memory | tanpa tool | |
 
-## 6. Runner: cara memanggil Claude Code
+Model per peran di `roles` config; `simplifier`, `test_lead`, dan `tester` opsional
+(bawaan mengikuti Developer/Lead).
 
-```ts
-spawn("claude", [
-  "-p", prompt,
-  "--output-format", "json",
-  "--json-schema", JSON.stringify(schema),
-  "--append-system-prompt", rolePrompt,
-  "--tools", tools.join(","),
-  "--permission-mode", "dontAsk",      // tool di luar daftar = ditolak, tidak bertanya
-  "--permission-prompts", "none",
-  "--model", role.model,
-  "--effort", role.effort,
-  "--no-session-persistence",
-  "--strict-mcp-config",               // jangan muat MCP global (Figma, Drive, dll.)
-], {
-  cwd: repoRoot,
-  env: withoutKeys(process.env, ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]),
-});
-```
+### Dirty-bit dan loop
 
-Catatan penting (sudah dicek di mesin ini, Claude Code 2.1.281):
-- **Jangan pakai `--bare`**, karena mode itu tidak membaca login OAuth/Keychain
-  dan hanya menerima `ANTHROPIC_API_KEY`, jadi akan menagih API.
-- Uji coba `claude -p … --output-format json` berhasil dengan login Max. Field
-  `total_cost_usd` di output adalah **harga list (estimasi)**, bukan tagihan,
-  tetapi bisa dipakai untuk memantau seberapa berat sebuah run.
-- Overhead satu panggilan kosong sekitar **48k token** tanpa `--strict-mcp-config`
-  (MCP global ikut dimuat), dan hanya **~4–10k token** dengan flag itu. Karena
-  setiap agent adalah proses baru, flag ini wajib.
-- `claude-opus-5` dan `claude-sonnet-5` dengan `--effort xhigh` sudah dicoba
-  dan berjalan dengan login Max.
-
-### Deteksi rate limit
-- Output JSON punya `is_error`, `api_error_status`, dan `subtype`. Bentuk persis
-  untuk kasus limit langganan akan dicatat saat pertama kali terjadi, lalu
-  dicocokkan secara eksplisit.
-- Saat terkena limit: tugas dikembalikan ke `pending` (attempt **tidak**
-  bertambah), manifest disimpan, lalu proses keluar dengan kode `75`
-  dan pesan jam reset bila tersedia.
-- Opsi `bondowoso work --wait`: tidur sampai jam reset lalu lanjut sendiri.
+Berkas dipetakan ke domain lewat regex `domains` (bawaan: testing, database,
+frontend, api, sisanya backend). Setiap perubahan menandai domain yang disentuh
+`PENDING`; Tester dan Reviewer menulis `PASS`/`FAIL` per domain; FAIL di satu domain
+mengembalikan domain lain ke `PENDING`. Commit hanya kalau semua domain yang
+disentuh PASS di fase yang aktif. Feedback yang ≥ 90% mirip (Jaccard) dengan salah
+satu feedback sebelumnya dianggap loop dan tugas dihentikan lebih awal.
+Batas percobaan: `limits.max_attempts`.
 
 ---
 
-## 7. Strategi Git
+## 4. Hook
 
-- `bondowoso work` menolak jalan kalau ada file **tracked** yang berubah (di luar
-  `.bondowoso/`). File untracked milik user (misalnya lock file Office) dibiarkan
-  dan **tidak pernah dihapus**: sebelum tugas dimulai, daftar file untracked
-  dicatat, dan saat rollback hanya file untracked **baru** yang dihapus.
-- Orkestrator **tidak pernah push**. Ini penting untuk digiboost, karena push ke
-  `main` langsung memicu deploy produksi.
-- Hasil tidak membawa jejak orkestrator. Nama branch diusulkan Lead dari konvensi
-  branch repo (daftar branch + subject commit terbaru diberikan di prompt), ditulis di
-  baris `**Branch:**` plan.md dan boleh diedit sebelum approve. Nama yang tidak valid
-  (`git check-ref-format`) atau menyebut orkestrator diganti cadangan `feat/<5 kata awal>`;
-  bentrok nama diberi akhiran `-2`, `-3`, ...
-- Pertama kali jalan: buat branch itu dari HEAD.
-- Satu commit per tugas yang lolos. Pesannya diusulkan Developer mengikuti gaya commit
-  repo; id tugas di depan subject dan trailer (`Co-Authored-By`, "Generated with …")
-  dibuang. Untuk mengenali commit yang sempat dibuat sebelum proses terputus, HEAD
-  sebelum commit dicatat di manifest (`commit_base`), bukan ditandai di pesan commit.
-- Tugas yang gagal/blocked/terputus: diff-nya (termasuk file baru dan hasil
-  `git rm`/`git mv`) disimpan sebagai patch `runs/<run>/<id>-attempt-<n>.patch`,
-  lalu working tree dikembalikan ke commit terakhir. `bondowoso resume <id>`
-  memasang patch itu lagi; setelah manusia menambal, `work` langsung menjalankan
-  gate → Reviewer tanpa Developer, dan Developer baru dipanggil kalau ada yang menolak.
-- Developer boleh `git rm`/`git mv` (hanya menyentuh file yang dilacak git, jadi
-  selalu bisa dipulihkan). Daftar `developer_bash` ikut dimasukkan ke prompt-nya
-  supaya tidak membuang giliran menebak perintah yang diizinkan.
-- Merge ke branch utama dilakukan **manusia**.
+`src/hooks/hook.ts` dipasang lewat `claude --settings` (PreToolUse untuk
+Read/Edit/Write/MultiEdit/NotebookEdit/Grep/Glob/Bash), konfigurasi dikirim lewat
+env `BONDOWOSO_HOOK_CONFIG`. Penolakan dikirim sebagai `permissionDecision: "deny"`
+sehingga agent membaca alasannya dan orkestrator mencatatnya di `permission_denials`.
+
+- **Berkas sensitif:** `.env*` (kecuali `.example/.sample/.template/.dist`), `*.pem/key/p12/pfx/jks/keystore/ppk`,
+  `id_rsa|dsa|ecdsa|ed25519`, `credentials*`, `secrets*`, `.npmrc/.pypirc/.netrc/.git-credentials/.pgpass`,
+  `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.docker`, `~/.config/gh`.
+- **Perintah:** `printenv`/`env`/`export`/`set` tanpa argumen, `$…TOKEN|SECRET|PASSWORD|API_KEY…`,
+  keychain macOS, `gh auth token`, kredensial AWS, `git push`, `curl … | sh`, dan
+  token apa pun yang menunjuk berkas sensitif.
+- **Compaction gate:** membaca token pesan asisten terakhir dari transcript sesi;
+  di atas `hooks.compaction_block_pct` (bawaan 85%) dari `hooks.context_window`
+  semua tool ditolak dan agent diminta mengembalikan output sekarang. Karena itu
+  sesi disimpan (tanpa `--no-session-persistence`) lalu transcript-nya dihapus
+  orkestrator setelah agent selesai.
+- **Kunci berkas (paralel):** first-writer-wins lewat `mkdir` atomik di
+  `~/.bondowoso/locks/<repo>/<run>/`; dilepas saat tugas selesai/blocked.
+
+Catatan riset: hook Jonggrang memblokir dengan exit 2 tetapi menulis alasan ke
+stdout, sehingga alasannya kemungkinan tidak sampai ke model. Bondowoso memakai
+JSON `permissionDecision` yang sudah diuji sampai ke agent.
 
 ---
 
-## 8. Struktur kode orkestrator
+## 5. Skill
 
-Node v26 bisa menjalankan `.ts` langsung (type stripping), jadi **tidak perlu
-build step**. `tsc --noEmit` hanya dipakai untuk typecheck.
+Format mengikuti Jonggrang: `skills/core/<nama>/SKILL.md` (selalu dimuat untuk
+`roles`-nya) dan `skills/library/<domain>/<nama>/SKILL.md` (just-in-time), dengan
+frontmatter `name, description, tier, domains, roles, trigger`. Skill proyek di
+`.bondowoso/skills/**` menimpa skill bawaan bernama sama.
+
+Pemilihan deterministik per tugas: skill yang ditetapkan Lead saat dekomposisi
+(dari katalog), lalu skill library yang kata kuncinya cocok dengan teks tugas
+(dengan bonus domain berkas), maksimal `skills.max_per_task`, dipotong di
+`skills.max_chars`. Isinya disisipkan ke prompt Developer, Tester, dan Reviewer.
+
+---
+
+## 6. Memory
 
 ```
-bondowoso/
-├── package.json            # "type": "module", bin: { bondowoso: "src/cli.ts" }
-├── tsconfig.json
-├── src/
-│   ├── cli.ts              # commander: init/plan/approve/work/status/reset
-│   ├── config.ts           # baca & validasi config.yaml (zod)
-│   ├── manifest.ts         # tipe, baca/tulis atomik, pemilihan tugas berikutnya
-│   ├── runner/claude.ts    # spawn claude, parse JSON, bersihkan env, deteksi limit
-│   ├── roles/              # lead.ts, developer.ts, reviewer.ts (tools + schema + builder prompt)
-│   ├── prompts/            # lead-plan.md, lead-decompose.md, developer.md, reviewer.md
-│   ├── pipeline/           # plan.ts, approve.ts, work.ts
-│   ├── gates.ts            # jalankan perintah gate, tangkap tail output
-│   ├── git.ts
-│   └── log.ts
-└── test/                   # vitest
-    └── fake-claude.ts      # stub CLI: balasan JSON dari fixture, tanpa kuota
+.bondowoso/memory/fragments/<run>/<tugas>.md   catatan per tugas (commit, what/why, lessons, catatan minor)
+.bondowoso/memory/runs/<run>.md                 hasil compact satu run
+.bondowoso/memory/archive/<run>/                fragmen yang sudah di-compact
+.bondowoso/MEMORY.md                            pelajaran proyek (Conventions, Known Pitfalls,
+                                                Architectural Decisions, Repeated Lessons)
 ```
 
-Dependensi: `commander`, `yaml`, `zod` (v4 bisa langsung menghasilkan JSON Schema
-untuk `--json-schema`), `vitest` (dev). Selain itu hanya `node:child_process`
-dan `node:fs`.
-
-Pengujian orkestrator memakai `BONDOWOSO_CLAUDE_BIN=test/fake-claude.ts`, sehingga
-seluruh alur (retry, gate gagal, review menolak, rate limit, resume) bisa diuji
-tanpa memakai kuota Max.
-
----
-
-## 9. Roadmap
-
-**MVP (fase 1)**
-1. Kerangka CLI, config, manifest, runner + fake-claude.
-2. `plan` dan `approve`.
-3. `work`: developer → gates → reviewer → commit, retry, blocked, resume.
-4. Deteksi rate limit + `--wait`.
-5. Uji coba nyata di `~/Working/digiboost` (monorepo Go + Nuxt).
-
-**Fase 2**
-- Peran Tester (test-first dari acceptance criteria).
-- Tugas paralel via `git worktree` + penguncian file.
-- Hook `PreToolUse` via `--settings` untuk membatasi path yang boleh diedit
-  per tugas.
-- Laporan akhir run (ringkasan tugas, commit, estimasi token).
+Setiap tugas yang ter-commit menulis fragmen dari `lessons` Developer/Reviewer.
+Di akhir run yang selesai semua, fragmen di-compact ke memory run lalu (bila
+`memory.auto_promote`) pelajaran stabil dipromosikan ke `MEMORY.md`. Keduanya
+diperiksa pola secret sebelum ditulis. Recall deterministik (potongan bagian
+paling relevan, ≤ 5 potongan dan `memory.recall_chars`) disisipkan ke prompt Lead
+dan Developer sebagai konteks, bukan instruksi.
 
 ---
 
-## 10. Keputusan (2026-09-25)
+## 7. Paralel
 
-1. Nama: **`bondowoso`**.
-2. Uji coba pertama: **`~/Working/digiboost`**. Gate diambil dari Taskfile/CI-nya:
-   cek `gofmt`, `go vet`, `go test ./...` di `api/`, dan `npm run build` di `web/`
-   (`nuxt typecheck` gagal karena `web/` tidak punya `tsconfig.json`; CI pun memakai build).
-3. Tester ditunda ke fase 2.
-4. Commit otomatis per tugas di branch terpisah; tidak pernah push.
-5. Model: Lead `claude-opus-5` (high), Developer `claude-sonnet-5` (xhigh),
-   Reviewer `claude-opus-5` (medium).
+`work --parallel n` (atau `parallel.max`) menjalankan hingga n tugas siap
+bersamaan, masing-masing di worktree detached
+`~/.bondowoso/worktrees/<repo>/<run>/<tugas>` yang dibuat dari HEAD branch kerja.
+Tugas hanya dijadwalkan bersama kalau `files_hint`-nya tidak beririsan; selama
+jalan, hook kunci berkas menangani sisanya. Path di `parallel.link` (mis.
+`web/node_modules`) di-symlink ke worktree supaya gate tidak perlu install ulang.
+
+Setiap tugas menjalankan pipeline penuhnya di worktree dan commit di sana; commit
+lalu dipasang ke branch kerja satu per satu dengan cherry-pick. Kalau bentrok:
+cherry-pick dibatalkan, hasilnya disimpan sebagai patch, dan tugas diulang sekali
+dari HEAD terbaru; bentrok kedua → blocked (bisa `resume`). Worktree, kunci, dan
+folder run yang kosong dibersihkan. Kuota habis di satu tugas menghentikan
+penjadwalan baru; tugas lain yang sedang jalan dibiarkan selesai.
+
+---
+
+## 8. Git
+
+- `work` menolak jalan kalau ada perubahan tracked (kecuali tugas hasil `resume`).
+  File untracked milik user tidak pernah dihapus atau di-commit.
+- Branch dibuat dari HEAD atau `--base`; nama dari baris **Branch:** plan.md
+  (divalidasi `git check-ref-format`, tanpa nama orkestrator, cadangan
+  `feat/<5 kata>`, bentrok → `-2`).
+- Pesan commit ditulis agent mengikuti subject commit terbaru repo; id tugas dan
+  trailer AI dibuang.
+- Pemulihan setelah terputus: HEAD dicatat (`commit_base`) sebelum commit; patch
+  disimpan sebelum setiap rollback; worktree paralel yang tertinggal dibereskan.
+- Tidak pernah push atau merge.
+
+---
+
+## 9. Riwayat keputusan
+
+- 2026-09-25: nama `bondowoso`; uji coba di `~/Working/digiboost`; model Lead
+  Opus, Developer Sonnet (xhigh), Reviewer Opus; commit otomatis per tugas di
+  branch terpisah, tanpa push.
+- 2026-09-25: patch sebelum rollback dan `resume` (T1 digiboost sempat kehilangan
+  16 menit kerja); `git rm`/`git mv` diizinkan; daftar izin masuk prompt.
+- 2026-09-25: branch dan commit mengikuti konvensi repo, tanpa jejak orkestrator.
+- 2026-09-29: v2 mengikuti Jonggrang: Simplify, Test Lead/Tester, dirty-bit per
+  domain, hook, skill, memory, flag perencanaan, `--compact/--full/--task`, dan
+  paralel dengan worktree.

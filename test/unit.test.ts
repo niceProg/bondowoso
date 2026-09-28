@@ -1,4 +1,16 @@
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { resolveChoice } from "../src/ask.ts";
+import { ConfigSchema } from "../src/config.ts";
+import { emptyState, exitGate, jaccard, markDirty, recordFeedbackAndCheckLoop, recordResult, touchedDomains } from "../src/feedback.ts";
+import { restoreOutside, snapshot } from "../src/git.ts";
+import { phasesFor, splitDiffByFile } from "../src/pipeline/task.ts";
+import { scanDiffForSecrets } from "../src/secrets.ts";
+
+const r = { model: "m", effort: "high" as const };
 import { nextTask, validateTaskGraph, type Manifest, type TaskSpec } from "../src/manifest.ts";
 import { buildArgs, parseResetTime } from "../src/runner/claude.ts";
 import { DeveloperOutput } from "../src/roles.ts";
@@ -113,5 +125,97 @@ describe("naming", () => {
     expect(fallbackBranch("!!!")).toBe("feat/update");
     expect(acceptableBranch("bondowoso/x")).toBe(false);
     expect(acceptableBranch("feat/x")).toBe(true);
+  });
+});
+
+describe("dirty-bit per domain", () => {
+  const config = { domains: ConfigSchema.parse({ roles: { lead: r, developer: r, reviewer: r } }).domains };
+  it("memetakan berkas ke domain", () => {
+    expect(touchedDomains(["web/app/pages/a.vue", "api/internal/x.go", "api/internal/x_test.go"], config)).toEqual(["api", "frontend", "testing"]);
+  });
+  it("commit baru boleh setelah review DAN testing PASS di semua domain yang disentuh", () => {
+    const s = emptyState();
+    markDirty(s, ["api", "frontend"]);
+    expect(exitGate(s, ["api", "frontend"], { review: true, testing: true }).allowed).toBe(false);
+    recordResult(s, ["api", "frontend"], "testing", "PASS");
+    recordResult(s, ["api"], "review", "PASS");
+    expect(exitGate(s, ["api", "frontend"], { review: true, testing: true }).blocked).toEqual(["frontend: review=PENDING, testing=PASS"]);
+    recordResult(s, ["frontend"], "review", "FAIL");
+    // FAIL di satu domain mengembalikan domain lain ke PENDING.
+    expect(s.domains.api).toEqual({ review: "PENDING", testing: "PENDING" });
+    expect(exitGate(s, ["api"], { review: false, testing: false }).allowed).toBe(true);
+  });
+  it("mendeteksi feedback yang berulang", () => {
+    const s = emptyState();
+    expect(recordFeedbackAndCheckLoop(s, "tambahkan validasi email di handler register")).toBe(false);
+    expect(recordFeedbackAndCheckLoop(s, "perbaiki test login yang gagal karena timeout")).toBe(false);
+    expect(recordFeedbackAndCheckLoop(s, "tambahkan validasi email di handler register")).toBe(true);
+    expect(jaccard("a b c", "x y z")).toBe(1); // kata < 3 huruf diabaikan → sama-sama kosong
+  });
+});
+
+describe("scan secret", () => {
+  const diff = (lines: string[]) => ["+++ b/cfg.ts", "@@ -0,0 +1,9 @@", ...lines.map((l) => `+${l}`)].join("\n");
+  it("menemukan kunci dan password di baris yang ditambahkan", () => {
+    const f = scanDiffForSecrets(
+      diff([
+        "const a = 1",
+        "aws = 'AKIAQWERTYUIOPASDFGH'",
+        "db = 'postgres://app:hunter22@db:5432/x'",
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "const apiKey = \"sk9f8a7s6d5f4g3h2j1k0l9z\"",
+      ]),
+    );
+    expect(f.map((x) => `${x.line}:${x.kind}`)).toEqual(["2:AWS access key", "3:URL database dengan password", "4:private key", "5:nilai rahasia"]);
+  });
+  it("mengabaikan placeholder dan baris yang dihapus", () => {
+    expect(scanDiffForSecrets(diff(["apiKey = 'your-api-key-here-000000'", "url = 'postgres://user:${PASS}@db/x'"]))).toEqual([]);
+    expect(scanDiffForSecrets("+++ b/a\n@@ -1 +1 @@\n-aws = 'AKIAQWERTYUIOPASDFGH'")).toEqual([]);
+  });
+});
+
+describe("restoreOutside", () => {
+  it("mengembalikan berkas di luar wewenang ke kondisi snapshot", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bondowoso-snap-"));
+    const g = (...a: string[]) => spawnSync("git", a, { cwd: dir, encoding: "utf8" });
+    g("init", "-q");
+    g("config", "user.email", "t@e");
+    g("config", "user.name", "t");
+    writeFileSync(join(dir, "impl.go"), "v1\n");
+    writeFileSync(join(dir, "keep.go"), "asli\n");
+    g("add", ".");
+    g("commit", "-qm", "awal");
+    writeFileSync(join(dir, "impl.go"), "v2 dari developer\n");
+    const snap = snapshot(dir, []);
+    // "Tester" mengubah implementasi, menambah test, dan menyentuh berkas lain.
+    writeFileSync(join(dir, "impl.go"), "diubah tester\n");
+    writeFileSync(join(dir, "impl_test.go"), "test\n");
+    writeFileSync(join(dir, "keep.go"), "rusak\n");
+    const restored = restoreOutside(dir, snap, [], (p) => p.endsWith("_test.go"));
+    expect(restored).toEqual(["impl.go", "keep.go"]);
+    expect(readFileSync(join(dir, "impl.go"), "utf8")).toBe("v2 dari developer\n");
+    expect(readFileSync(join(dir, "keep.go"), "utf8")).toBe("asli\n");
+    expect(readFileSync(join(dir, "impl_test.go"), "utf8")).toBe("test\n");
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("lain-lain", () => {
+  it("jawaban klarifikasi: nomor, multi, atau teks bebas", () => {
+    const q = { question: "?", rationale: "", type: "multi_choice" as const, options: [{ value: "a", label: "A", rationale: "" }, { value: "b", label: "B", rationale: "" }] };
+    expect(resolveChoice(q, "1, 2")).toBe("A, B");
+    expect(resolveChoice({ ...q, type: "single_choice" }, "2 1")).toBe("B");
+    expect(resolveChoice(q, "lainnya saja")).toBe("lainnya saja");
+  });
+  it("memecah diff per berkas", () => {
+    const d = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@\n+1\ndiff --git a/y b/y\n--- a/y\n+++ /dev/null\n@@\n-2\n";
+    const m = splitDiffByFile(d);
+    expect([...m.keys()]).toEqual(["x", "y"]);
+  });
+  it("fase dilewati sesuai scope dan mode", () => {
+    const c = ConfigSchema.parse({ roles: { lead: r, developer: r, reviewer: r } });
+    expect(phasesFor(c, "bugfix", "normal")).toEqual({ simplify: false, test: true, review: true });
+    expect(phasesFor(c, "medium", "normal")).toEqual({ simplify: true, test: true, review: true });
+    expect(phasesFor(c, "medium", "compact")).toEqual({ simplify: false, test: false, review: false });
   });
 });

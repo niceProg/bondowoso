@@ -12,8 +12,9 @@ interface DetectedGate {
 
 // Cari proyek Node/Go di root dan satu tingkat di bawahnya (monorepo seperti
 // api/ + web/), lalu tebak gate dan izin Bash Developer dari sana.
-function detect(root: string): { gates: DetectedGate[]; bash: Set<string> } {
+function detect(root: string): { gates: DetectedGate[]; bash: Set<string>; links: string[] } {
   const gates: DetectedGate[] = [];
+  const links: string[] = [];
   // Git read-only tidak otomatis lolos di mode dontAsk. `git rm`/`git mv` hanya
   // menyentuh file yang dilacak git, jadi selalu bisa dipulihkan.
   const bash = new Set<string>(["git status:*", "git diff:*", "git log:*", "git show:*", "git rm:*", "git mv:*"]);
@@ -31,6 +32,8 @@ function detect(root: string): { gates: DetectedGate[]; bash: Set<string> } {
       for (const p of ["go build:*", "go test:*", "go vet:*", "gofmt:*", "go mod tidy:*"]) bash.add(p);
     }
     const pkgPath = join(abs, "package.json");
+    // node_modules di-symlink ke worktree paralel supaya gate tidak install ulang.
+    if (existsSync(join(abs, "node_modules"))) links.push(dir === "." ? "node_modules" : `${dir}/node_modules`);
     if (existsSync(pkgPath)) {
       const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
       const scripts: Record<string, string> = pkg.scripts ?? {};
@@ -42,7 +45,7 @@ function detect(root: string): { gates: DetectedGate[]; bash: Set<string> } {
       for (const p of ["npm run:*", "npm test:*"]) bash.add(p);
     }
   }
-  return { gates, bash };
+  return { gates, bash, links };
 }
 
 export function init(ctx: Ctx): void {
@@ -51,7 +54,7 @@ export function init(ctx: Ctx): void {
     return;
   }
   mkdirSync(ctx.stateDir, { recursive: true });
-  const { gates, bash } = detect(ctx.root);
+  const { gates, bash, links } = detect(ctx.root);
 
   const config = {
     language: "Indonesian",
@@ -63,6 +66,11 @@ export function init(ctx: Ctx): void {
     },
     developer_bash: [...bash],
     limits: { max_attempts: 3, gate_output_tail: 150, agent_timeout_min: 45, max_diff_chars: 150000 },
+    pipeline: { simplify: true, test: true, review: true },
+    hooks: { enabled: true, context_window: 200000, compaction_block_pct: 85 },
+    memory: { enabled: true, auto_promote: true },
+    skills: { enabled: true, max_per_task: 3 },
+    parallel: { max: 1, link: links },
   };
   const header = [
     "# Konfigurasi Bondowoso. Gate dijalankan berurutan oleh orkestrator setelah",
@@ -71,8 +79,8 @@ export function init(ctx: Ctx): void {
     "",
   ].join("\n");
   writeFileSync(ctx.configPath, header + stringify(config, { lineWidth: 0 }));
-  // Hanya config.yaml yang layak di-commit; state run tetap lokal.
-  writeFileSync(join(ctx.stateDir, ".gitignore"), "*\n!.gitignore\n!config.yaml\n");
+  // Config, memory proyek, dan skill proyek layak di-commit; state run tetap lokal.
+  writeFileSync(join(ctx.stateDir, ".gitignore"), "*\n!.gitignore\n!config.yaml\n!MEMORY.md\n!skills/\n!skills/**\n");
 
   log.ok(`Dibuat ${ctx.configPath}`);
   if (gates.length) {

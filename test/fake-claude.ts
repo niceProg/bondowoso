@@ -16,23 +16,27 @@ interface Step {
 }
 
 const role = process.env.BONDOWOSO_ROLE ?? "unknown";
+const hook = process.env.BONDOWOSO_HOOK_CONFIG ? (JSON.parse(process.env.BONDOWOSO_HOOK_CONFIG) as { task?: string }) : undefined;
 const scriptPath = process.env.BONDOWOSO_FAKE_SCRIPT!;
 const script: Record<string, Step[]> = JSON.parse(readFileSync(scriptPath, "utf8"));
 
-const counterPath = `${scriptPath}.${role}.count`;
+// Skenario per tugas ("developer:T2") didahulukan; urutan panggilan di mode
+// paralel tidak deterministik, jadi antrean per peran saja tidak cukup.
+const key = hook?.task && script[`${role}:${hook.task}`] ? `${role}:${hook.task}` : role;
+const counterPath = `${scriptPath}.${key.replace(":", "-")}.count`;
 const n = existsSync(counterPath) ? Number(readFileSync(counterPath, "utf8")) : 0;
 writeFileSync(counterPath, String(n + 1));
 
 const prompt = readFileSync(0, "utf8");
-appendFileSync(`${scriptPath}.calls.jsonl`, `${JSON.stringify({ role, n, args: process.argv.slice(2), prompt })}\n`);
+appendFileSync(`${scriptPath}.calls.jsonl`, `${JSON.stringify({ role, task: hook?.task, n, args: process.argv.slice(2), prompt, cwd: process.cwd(), hook })}\n`);
 
 const reply = (data: Record<string, unknown>, code = 0): never => {
   console.log(JSON.stringify({ type: "result", total_cost_usd: 0.01, permission_denials: [], ...data }));
   process.exit(code);
 };
 
-const step = script[role]?.[n];
-if (!step) reply({ is_error: true, subtype: "error", result: `fake: tidak ada langkah ${role}#${n}` }, 1);
+const step = script[key]?.[n];
+if (!step) reply({ is_error: true, subtype: "error", result: `fake: tidak ada langkah ${key}#${n}` }, 1);
 
 for (const [path, content] of Object.entries(step!.write ?? {})) {
   mkdirSync(dirname(path), { recursive: true });
