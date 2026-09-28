@@ -171,6 +171,15 @@ describe("scan secret", () => {
   it("mengabaikan placeholder dan baris yang dihapus", () => {
     expect(scanDiffForSecrets(diff(["apiKey = 'your-api-key-here-000000'", "url = 'postgres://user:${PASS}@db/x'"]))).toEqual([]);
     expect(scanDiffForSecrets("+++ b/a\n@@ -1 +1 @@\n-aws = 'AKIAQWERTYUIOPASDFGH'")).toEqual([]);
+    // Database lokal untuk dev/E2E bukan rahasia; host lain tetap ditandai.
+    expect(scanDiffForSecrets(diff(["DATABASE_URL: 'postgresql://digiboost:digiboost@localhost:5434/e2e?sslmode=disable'"]))).toEqual([]);
+    expect(scanDiffForSecrets(diff(["url = 'postgres://app:s3cr3tpass@127.0.0.1/x'"]))).toEqual([]);
+    expect(scanDiffForSecrets(diff(["url = 'postgres://app:s3cr3tpass@db.prod.internal:5432/x'"]))).toHaveLength(1);
+    // Kredensial palsu di berkas test dilewati, tapi kunci asli tetap tertangkap.
+    const inTest = (line: string) => `+++ b/e2e/tests/user-journey.spec.ts\n@@ -0,0 +1 @@\n+${line}`;
+    expect(scanDiffForSecrets(inTest("const password = 'SuperSecret123!'"))).toEqual([]);
+    expect(scanDiffForSecrets(inTest("const k = 'AKIAQWERTYUIOPASDFGH'"))).toHaveLength(1);
+    expect(scanDiffForSecrets(diff(["const password = 'SuperSecret123!'"]))).toHaveLength(1);
   });
 });
 
